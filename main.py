@@ -7,6 +7,7 @@ import asyncio
 import uvicorn
 from fastapi import FastAPI
 
+# --- IMPORTAMOS NUESTRAS FUNCIONES DE BASE DE DATOS ---
 from database import setup_database, set_user_email, get_user_email
 
 from email.mime.multipart import MIMEMultipart
@@ -59,6 +60,10 @@ async def startup_event():
     
     # 5. Iniciar el bot en segundo plano. Esto es NO bloqueante.
     await application.initialize()
+
+    # --- LÍNEA AÑADIDA: Limpia los mensajes pendientes al arrancar ---
+    await application.updater.bot.get_updates(drop_pending_updates=True)
+    
     await application.updater.start_polling()
     await application.start()
     
@@ -92,32 +97,49 @@ class KindleEmailBot:
     async def set_email_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if not context.args:
-            await update.message.reply_html("Ejemplo: <code>/set_email tu_email@kindle.com</code>")
+            await update.message.reply_html(
+                "Por favor, proporciona tu email de Kindle después del comando.\n"
+                "Ejemplo: <code>/set_email tu_email@kindle.com</code>"
+            )
             return
         kindle_email = context.args[0]
         if '@' not in kindle_email or '.' not in kindle_email:
-            await update.message.reply_html("El formato del email no parece válido.")
+            await update.message.reply_html("El formato del email no parece válido. Por favor, inténtalo de nuevo.")
             return
         if set_user_email(user_id, kindle_email):
-            await update.message.reply_html(f"✅ Email guardado: <code>{kindle_email}</code>")
+            await update.message.reply_html(f"✅ ¡Perfecto! He guardado tu email de Kindle como: <code>{kindle_email}</code>")
         else:
-            await update.message.reply_html("❌ Hubo un error al guardar tu email.")
+            await update.message.reply_html("❌ Hubo un error al intentar guardar tu email.")
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         await update.message.reply_html(
             f"¡Hola {user.mention_html()}!\n\n"
-            f"<b>PRIMER PASO:</b> Configura tu email de Kindle con:\n"
-            f"<code>/set_email tu_direccion@kindle.com</code>"
+            f"📚 <b>Bot de Envío a Kindle</b>\n\n"
+            f"Este bot te permite enviar documentos a tu Kindle personal.\n\n"
+            f"<b>PRIMER PASO:</b>\n"
+            f"Configura tu email de Kindle con el comando:\n"
+            f"<code>/set_email tu_direccion@kindle.com</code>\n\n"
+            f"Usa /help para más información."
         )
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text = """
-        📚 <b>Ayuda del Bot</b>
-        1️⃣ <b>Configura tu Email:</b> <code>/set_email tu_email@kindle.com</code>
-        2️⃣ <b>Envía un Documento:</b> Simplemente comparte un archivo compatible.
-        ⭐ <b>TRUCO PDF:</b> Escribe <b>convert</b> en el pie de foto para convertir PDFs a formato de libro.
-        🔧 <b>Importante:</b> Autoriza <code>{}</code> en tu cuenta de Amazon.
+        📚 <b>Ayuda del Bot de Envío a Kindle</b>
+
+        1️⃣ <b>Configura tu Email (Solo una vez)</b>
+        Usa el comando <code>/set_email</code> para decirme a dónde enviar tus libros.
+        Ejemplo: <code>/set_email mi_usuario_123@kindle.com</code>
+
+        2️⃣ <b>Envía un Documento</b>
+        Simplemente comparte conmigo un archivo compatible. ¡Yo me encargo del resto!
+        Formatos: <code>.epub, .pdf, .docx, .mobi, etc.</code>
+
+        ⭐ <b>TRUCO PARA PDF</b>
+        Si envías un PDF y quieres que se convierta a formato de libro electrónico, escribe <b>convert</b> en el pie de foto del archivo.
+
+        🔧 <b>Requisito Importante</b>
+        Asegúrate de haber autorizado el email del bot (<code>{}</code>) en la configuración de tu cuenta de Amazon para que acepte los envíos.
         """.format(self.gmail_user)
         await update.message.reply_html(help_text)
 
@@ -127,7 +149,7 @@ class KindleEmailBot:
             msg['From'] = self.gmail_user
             msg['To'] = kindle_email_destino
             msg['Subject'] = subject if subject else f"Documento para Kindle: {filename}"
-            msg.attach(MIMEText(f"Enviado por tu bot de Telegram.", 'plain'))
+            msg.attach(MIMEText(f"Este documento ha sido enviado por tu bot de Telegram.", 'plain'))
             ctype, encoding = mimetypes.guess_type(filename)
             if ctype is None or encoding is not None: ctype = 'application/octet-stream'
             maintype, subtype = ctype.split('/', 1)
@@ -141,7 +163,7 @@ class KindleEmailBot:
             server.login(self.gmail_user, self.gmail_password)
             server.send_message(msg)
             server.quit()
-            return True, "Enviado."
+            return True, "Enviado con éxito."
         except Exception as e:
             logger.error(f"Error al enviar email: {e}")
             return False, str(e)
@@ -150,32 +172,32 @@ class KindleEmailBot:
         user_id = update.effective_user.id
         user_kindle_email = get_user_email(user_id)
         if not user_kindle_email:
-            await update.message.reply_html("⚠️ No has configurado tu email. Usa <code>/set_email</code>.")
+            await update.message.reply_html("⚠️ No has configurado tu email. Usa <code>/set_email tu_email@kindle.com</code> para empezar.")
             return
         document = update.message.document
         filename = document.file_name
         if not any(filename.lower().endswith(ext) for ext in SUPPORTED_FORMATS):
-            await update.message.reply_html(f"❌ Formato no soportado.")
+            await update.message.reply_html(f"❌ Formato de archivo no soportado.")
             return
         if document.file_size > 48 * 1024 * 1024:
-            await update.message.reply_html("❌ Archivo demasiado grande.")
+            await update.message.reply_html("❌ Archivo demasiado grande. El límite es de 50MB.")
             return
-        processing_msg = await update.message.reply_html("✅ Recibido. Procesando...")
+        processing_msg = await update.message.reply_html("✅ Recibido. Procesando y enviando...")
         try:
             file = await context.bot.get_file(document.file_id)
             file_data = await file.download_as_bytearray()
             email_subject = "Convert" if filename.lower().endswith('.pdf') and update.message.caption and update.message.caption.lower().strip() == 'convert' else ""
             success, message = self.send_to_kindle(user_kindle_email, file_data, filename, subject=email_subject)
             if success:
-                await processing_msg.edit_text(f"✅ <b>¡Enviado a <code>{user_kindle_email}</code>!</b>", parse_mode=ParseMode.HTML)
+                await processing_msg.edit_text(f"✅ <b>¡Enviado a <code>{user_kindle_email}</code>!</b>\n\nEl libro aparecerá en tu Kindle en unos minutos.", parse_mode=ParseMode.HTML)
             else:
-                await processing_msg.edit_text(f"❌ <b>Error:</b> <i>{message}</i>", parse_mode=ParseMode.HTML)
+                await processing_msg.edit_text(f"❌ <b>Error al enviar:</b> <i>{message}</i>", parse_mode=ParseMode.HTML)
         except Exception as e:
             logger.error(f"Error procesando documento: {e}")
-            await processing_msg.edit_text(f"❌ Error inesperado.", parse_mode=ParseMode.HTML)
+            await processing_msg.edit_text(f"❌ Ha ocurrido un error inesperado.", parse_mode=ParseMode.HTML)
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_html("Hola, configura tu email con <code>/set_email</code> o envíame un documento.")
+        await update.message.reply_html("Hola, para empezar, configura tu email con <code>/set_email</code> o envíame un documento.")
 
 
 # --- EL PUNTO DE ENTRADA AHORA SOLO INICIA EL SERVIDOR WEB ---
