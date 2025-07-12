@@ -23,11 +23,13 @@ def setup_database():
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Tabla de usuarios (sin cambios)
+            # Tabla de usuarios
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
-                    kindle_email TEXT NOT NULL
+                    kindle_email TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    last_activity_at TIMESTAMPTZ
                 )
             """)
             # Nueva tabla para métricas
@@ -48,10 +50,12 @@ def setup_database():
 
 # --- FUNCIONES DE USUARIO ---
 def set_user_email(user_id: int, kindle_email: str) -> bool:
-    """Guarda o actualiza el email de Kindle para un usuario."""
+    """Guarda o actualiza el email de Kindle y la actividad del usuario."""
     sql = """
-        INSERT INTO users (user_id, kindle_email) VALUES (%s, %s)
-        ON CONFLICT (user_id) DO UPDATE SET kindle_email = EXCLUDED.kindle_email;
+        INSERT INTO users (user_id, kindle_email, last_activity_at) VALUES (%s, %s, NOW())
+        ON CONFLICT (user_id) DO UPDATE SET 
+            kindle_email = EXCLUDED.kindle_email,
+            last_activity_at = NOW();
     """
     try:
         conn = get_db_connection()
@@ -65,18 +69,39 @@ def set_user_email(user_id: int, kindle_email: str) -> bool:
         return False
 
 def get_user_email(user_id: int) -> str or None:
-    """Obtiene el email de Kindle para un usuario."""
-    sql = "SELECT kindle_email FROM users WHERE user_id = %s;"
+    """Obtiene el email de Kindle para un usuario y actualiza su actividad."""
+    email = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            cur.execute(sql, (user_id,))
+            cur.execute("SELECT kindle_email FROM users WHERE user_id = %s;", (user_id,))
             result = cur.fetchone()
-        conn.close()
-        return result[0] if result else None
+            email = result[0] if result else None
+            
+            # Actualizar la última actividad
+            if email:
+                cur.execute("UPDATE users SET last_activity_at = NOW() WHERE user_id = %s;", (user_id,))
+                conn.commit()
     except Exception as e:
         logger.error("Error al obtener email para el usuario %s: %s", user_id, e)
-        return None
+    finally:
+        if conn:
+            conn.close()
+    return email
+
+def get_total_users() -> int:
+    """Obtiene el número total de usuarios registrados."""
+    sql = "SELECT COUNT(*) FROM users;"
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            result = cur.fetchone()
+        conn.close()
+        return result[0] if result else 0
+    except Exception as e:
+        logger.error(f"Error al contar usuarios: {e}")
+        return 0
 
 # --- FUNCIONES DE MÉTRICAS ---
 def save_metric(metric_name: str, user_id: int or None, value: int):
@@ -104,17 +129,3 @@ def get_metrics_from_db() -> List[Tuple[Any, ...]]:
     except Exception as e:
         logger.error(f"Error al obtener métricas de la BD: {e}")
         return []
-
-def get_total_users() -> int:
-    """Obtiene el número total de usuarios registrados."""
-    sql = "SELECT COUNT(*) FROM users;"
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            result = cur.fetchone()
-        conn.close()
-        return result[0] if result else 0
-    except Exception as e:
-        logger.error(f"Error al contar usuarios: {e}")
-        return 0
