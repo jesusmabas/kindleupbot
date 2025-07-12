@@ -1,4 +1,4 @@
-# main.py - Versión mejorada
+# main.py - Versión mejorada y corregida
 import os
 import logging
 import smtplib
@@ -538,8 +538,6 @@ async def clear_cache():
     """Endpoint para limpiar caché"""
     cache_manager.clear()
     return {"message": "Caché limpiado exitosamente"}
-
-# Continuará en la siguiente parte...
 
 # --- CLASE PRINCIPAL DEL BOT (MEJORADA) ---
 class KindleEmailBot:
@@ -1153,7 +1151,7 @@ Documento enviado desde tu Bot de Telegram
             logger.error(f"Error SMTP enviando a {kindle_email}: {e}")
             return False, error_msg
 
-        @track_metrics('handle_text')
+    @track_metrics('handle_text')
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Manejo mejorado de texto que reconoce los botones del teclado."""
         text = update.message.text
