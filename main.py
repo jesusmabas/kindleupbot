@@ -8,24 +8,22 @@ import uvicorn
 from contextlib import asynccontextmanager
 from typing import Optional, Tuple, Dict, Any
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import defaultdict
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
 from email import encoders
-import json
 import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from database import setup_database, set_user_email, get_user_email, get_metrics_from_db, save_metric, get_total_users
 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, ForceReply
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, ForceReply
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
@@ -51,7 +49,7 @@ logger = logging.getLogger(__name__)
 SUPPORTED_FORMATS = ('.epub', '.pdf', '.mobi', '.azw', '.doc', '.docx', '.rtf', '.txt', '.html', '.htm', '.jpg', '.jpeg', '.png', '.gif', '.bmp')
 PROMPT_SET_EMAIL = "De acuerdo, por favor, introduce ahora tu email de Kindle:"
 
-# --- SISTEMA DE MÉTRICAS (COMPLETADO) ---
+# --- SISTEMA DE MÉTRICAS (CORREGIDO) ---
 class MetricsCollector:
     def __init__(self):
         self.start_time = time.time()
@@ -61,7 +59,6 @@ class MetricsCollector:
         self.response_times = []
 
     def load_from_db(self):
-        """Carga y procesa métricas históricas desde la base de datos."""
         logger.info("Cargando métricas históricas desde la base de datos...")
         historical_metrics = get_metrics_from_db()
         for metric_name, user_id, value in historical_metrics:
@@ -70,11 +67,22 @@ class MetricsCollector:
                 self.user_metrics[user_id][metric_name] += value
         logger.info(f"{len(historical_metrics)} registros de métricas cargados.")
 
+    # --- CORRECCIÓN AQUÍ ---
+    async def _save_metric_async(self, metric_name: str, user_id: Optional[int], value: int):
+        """Ejecuta la función síncrona de guardado en un hilo separado."""
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, save_metric, metric_name, user_id, value)
+        except Exception as e:
+            logger.error(f"Error en la tarea de guardado de métrica en segundo plano: {e}")
+
     def increment(self, metric_name: str, user_id: Optional[int] = None, value: int = 1):
+        """Incrementa una métrica y la guarda en BD en segundo plano."""
         self.metrics[metric_name] += value
         if user_id:
             self.user_metrics[user_id][metric_name] += value
-        asyncio.create_task(save_metric(metric_name, user_id, value))
+        # Ahora creamos una tarea a partir de nuestra corutina wrapper, que es lo correcto.
+        asyncio.create_task(self._save_metric_async(metric_name, user_id, value))
 
     def log_error(self, error_type: str, error_message: str, user_id: Optional[int] = None):
         error_data = {'timestamp': datetime.now().isoformat(), 'type': error_type, 'message': error_message, 'user_id': user_id}
@@ -90,9 +98,7 @@ class MetricsCollector:
     def get_summary(self) -> Dict[str, Any]:
         uptime = time.time() - self.start_time
         avg_response_time = sum(r['duration'] for r in self.response_times) / len(self.response_times) if self.response_times else 0
-        
         return {
-            'uptime_seconds': uptime,
             'uptime_formatted': self._format_uptime(uptime),
             'total_users': get_total_users(),
             'total_documents_sent': self.metrics.get('document_sent', 0),
@@ -129,6 +135,14 @@ class MetricsCollector:
 
 metrics_collector = MetricsCollector()
 
+# (El resto del archivo `main.py` que te proporcioné anteriormente no necesita cambios)
+# Puedes copiarlo desde la respuesta anterior, ya que el resto de la estructura
+# con el decorador, la clase del bot, FastAPI y el ciclo de vida es correcta.
+# Para evitar un bloque de código masivo, solo he puesto aquí la clase corregida.
+# Si lo prefieres, te doy el archivo completo de nuevo.
+
+# ... [PEGAR AQUÍ EL RESTO DEL ARCHIVO main.py DE LA RESPUESTA ANTERIOR] ...
+# (Desde la definición del decorador `track_metrics` hasta el final)
 # --- DECORADOR PARA MÉTRICAS ---
 def track_metrics(operation_name: str):
     def decorator(func):
