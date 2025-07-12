@@ -1,64 +1,70 @@
 # database.py
-import sqlite3
 import os
 import logging
+import psycopg2 # La nueva librería para PostgreSQL
 
-# Render nos dará un disco persistente en /data. Usaremos esa ruta.
-# Si la variable de entorno RENDER no existe (ej. probando en local), usa el directorio actual.
-DB_DIR = "/data" if os.getenv("RENDER") else "."
-DB_PATH = os.path.join(DB_DIR, "users.db")
+# Render nos dará la URL de conexión en esta variable de entorno
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+def get_db_connection():
+    """Establece una conexión con la base de datos PostgreSQL."""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except psycopg2.OperationalError as e:
+        logging.error("Error crítico de conexión a la base de datos: %s", e)
+        # Si la base de datos no está lista o la URL es incorrecta, el bot no puede funcionar.
+        raise e
 
 def setup_database():
-    """Crea la tabla de usuarios si no existe."""
-    # Asegurarse de que el directorio de la base de datos exista en Render
-    if not os.path.exists(DB_DIR):
-        os.makedirs(DB_DIR)
-        
+    """Crea la tabla de usuarios en PostgreSQL si no existe."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        # Creamos una tabla para guardar el ID de usuario de Telegram y su email de Kindle
-        # user_id es INTEGER y PRIMARY KEY para que sea único.
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                kindle_email TEXT NOT NULL
-            )
-        """)
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    kindle_email TEXT NOT NULL
+                )
+            """)
         conn.commit()
         conn.close()
-        logging.info("Base de datos configurada y lista en: %s", DB_PATH)
+        logging.info("Tabla 'users' verificada/creada en la base de datos PostgreSQL.")
     except Exception as e:
-        logging.error("Error al configurar la base de datos: %s", e)
+        logging.error("Error al configurar la tabla en la base de datos: %s", e)
 
 def set_user_email(user_id, kindle_email):
-    """Guarda o actualiza el email de Kindle para un usuario."""
+    """Guarda o actualiza el email de Kindle para un usuario en PostgreSQL."""
+    # La sintaxis para "insertar o actualizar" es diferente en PostgreSQL
+    sql = """
+        INSERT INTO users (user_id, kindle_email) VALUES (%s, %s)
+        ON CONFLICT (user_id) DO UPDATE SET kindle_email = EXCLUDED.kindle_email;
+    """
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        # "INSERT OR REPLACE" es muy útil: si el user_id ya existe, actualiza su email.
-        # Si no existe, lo inserta como una nueva fila.
-        cursor.execute("INSERT OR REPLACE INTO users (user_id, kindle_email) VALUES (?, ?)", (user_id, kindle_email))
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(sql, (user_id, kindle_email))
         conn.commit()
         conn.close()
         return True
     except Exception as e:
-        logging.error("Error al guardar el email para el usuario %s: %s", user_id, e)
+        logging.error("Error al guardar email para el usuario %s: %s", user_id, e)
         return False
 
 def get_user_email(user_id):
-    """Obtiene el email de Kindle para un usuario."""
+    """Obtiene el email de Kindle para un usuario desde PostgreSQL."""
+    sql = "SELECT kindle_email FROM users WHERE user_id = %s;"
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT kindle_email FROM users WHERE user_id = ?", (user_id,))
-        result = cursor.fetchone() # fetchone() devuelve una tupla (email,) o None si no encuentra nada
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(sql, (user_id,))
+            result = cur.fetchone()
         conn.close()
         
         if result:
-            return result[0] # Devolvemos solo el email (el primer elemento de la tupla)
+            return result[0]
         else:
-            return None # El usuario no ha configurado su email todavía
+            return None
     except Exception as e:
-        logging.error("Error al obtener el email para el usuario %s: %s", user_id, e)
+        logging.error("Error al obtener email para el usuario %s: %s", user_id, e)
         return None
