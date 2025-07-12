@@ -53,11 +53,14 @@ async def startup_event():
     
     # Iniciar el bot en segundo plano
     await application.initialize()
-    await application.updater.bot.get_updates(drop_pending_updates=True)
-    await application.updater.start_polling()
+
+    # --- CORRECCIÓN APLICADA AQUÍ ---
+    # Pasamos el parámetro directamente a start_polling
+    await application.updater.start_polling(drop_pending_updates=True)
+    
     await application.start()
     
-    logger.info("El bot de Telegram ha sido inicializado y está funcionando.")
+    logger.info("El bot de Telegram ha sido inicializado y está funcionando en segundo plano.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -79,14 +82,9 @@ class KindleEmailBot:
         self.bot_token = bot_token
         self.gmail_user = gmail_user
         self.gmail_password = gmail_password
-        # Definimos nuestro teclado reutilizable
-        self.main_keyboard = ReplyKeyboardMarkup(
-            [["/help ❓"]], 
-            resize_keyboard=True
-        )
+        self.main_keyboard = ReplyKeyboardMarkup([["/help ❓"]], resize_keyboard=True)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Envía un mensaje de bienvenida mucho más completo y muestra el teclado."""
         user = update.effective_user
         start_text = f"""
 👋 ¡Hola, {user.mention_html()}!
@@ -94,11 +92,6 @@ class KindleEmailBot:
 📚 <b>Bienvenido al Asistente de Envío a Kindle</b>
 
 Mi propósito es simple: convertir tu Telegram en un portal directo a tu biblioteca Kindle.
-
-<b>¿Qué hago?</b>
-1.  Recibo tus archivos (EPUB, PDF, etc.).
-2.  Los envío directamente a tu email de Kindle.
-3.  Amazon se encarga del resto y ¡listo para leer!
 
 🚀 <b>Tu Primer Paso:</b>
 Para empezar, necesito saber cuál es tu email de Kindle. Configúralo con el comando:
@@ -109,34 +102,27 @@ Si en algún momento necesitas ayuda, simplemente presiona el botón <b>/help �
         await update.message.reply_html(start_text, reply_markup=self.main_keyboard)
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Envía un mensaje de ayuda detallado y estructurado."""
         help_text = f"""
 🤔 <b>Guía Completa del Bot</b> 🤔
 
-Aquí tienes todo lo que necesitas saber para usarme al máximo.
-
-<b>📖 CÓMO FUNCIONA (EL PROCESO)</b>
-1.  <b>Configura tu email</b> con <code>/set_email</code> (solo lo haces una vez).
+<b>📖 CÓMO FUNCIONA</b>
+1.  <b>Configura tu email</b> con <code>/set_email</code> (solo una vez).
 2.  <b>Envía un archivo</b> compatible.
-3.  <b>¡Lee en tu Kindle!</b> El libro aparecerá en tu biblioteca en unos minutos.
+3.  <b>¡Lee en tu Kindle!</b>
 
 <b>⚙️ COMANDOS DISPONIBLES</b>
-• <code>/start</code> - Muestra el mensaje de bienvenida.
-• <code>/help</code> - Muestra esta guía de ayuda.
-• <code>/set_email [tu_email]</code> - Guarda o actualiza tu dirección de email de Kindle.
-• <code>/my_email</code> - Muestra el email que tienes configurado actualmente.
+• <code>/start</code> - Mensaje de bienvenida.
+• <code>/help</code> - Muestra esta guía.
+• <code>/set_email [tu_email]</code> - Guarda o actualiza tu email de Kindle.
+• <code>/my_email</code> - Muestra tu email configurado.
 • <code>/hide_keyboard</code> - Oculta el teclado de botones.
 
-⭐ <b>TRUCO PARA PDFS (¡EL MODO LECTURA!)</b>
-Si envías un archivo <b>PDF</b>, puedes pedirle a Amazon que lo convierta a un formato de libro electrónico (texto que se ajusta a la pantalla). Para ello, simplemente escribe la palabra <code>convert</code> en el pie de foto (comentario) del archivo antes de enviarlo.
+⭐ <b>TRUCO PARA PDFS</b>
+Escribe <code>convert</code> en el pie de foto de un PDF para convertirlo a formato de libro.
 
-<b>🔒 LA REGLA DE ORO (¡MUY IMPORTANTE!)</b>
-Para que yo pueda enviarte libros, debes autorizar mi dirección de correo en tu cuenta de Amazon.
-1. Ve a la web de Amazon -> Contenido y Dispositivos -> Preferencias -> Configuración de documentos personales.
-2. En la "Lista de e-mails de documentos personales aprobados", añade esta dirección:
-   <code>{self.gmail_user}</code>
-
-Si no haces esto, Amazon rechazará todos los envíos.
+<b>🔒 REQUISITO IMPORTANTE</b>
+Debes autorizar mi dirección de correo en tu cuenta de Amazon:
+<code>{self.gmail_user}</code>
         """
         await update.message.reply_html(help_text)
 
@@ -147,25 +133,23 @@ Si no haces esto, Amazon rechazará todos los envíos.
             return
         kindle_email = context.args[0]
         if '@' not in kindle_email or '.' not in kindle_email:
-            await update.message.reply_html("El formato del email no parece válido. Asegúrate de que sea correcto.")
+            await update.message.reply_html("El formato del email no parece válido.")
             return
         if set_user_email(user_id, kindle_email):
-            await update.message.reply_html(f"✅ ¡Genial! Tu email de Kindle ha sido guardado como:\n<code>{kindle_email}</code>")
+            await update.message.reply_html(f"✅ Email guardado como:\n<code>{kindle_email}</code>")
         else:
-            await update.message.reply_html("❌ Hubo un error al guardar tu email. Por favor, intenta de nuevo más tarde.")
+            await update.message.reply_html("❌ Hubo un error al guardar tu email.")
 
     async def my_email_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Permite al usuario comprobar su email guardado."""
         user_id = update.effective_user.id
         saved_email = get_user_email(user_id)
         if saved_email:
-            await update.message.reply_html(f"Tu email de Kindle configurado es:\n<code>{saved_email}</code>")
+            await update.message.reply_html(f"Tu email de Kindle es:\n<code>{saved_email}</code>")
         else:
-            await update.message.reply_html("Aún no has configurado tu email. Usa <code>/set_email</code> para empezar.")
+            await update.message.reply_html("Aún no has configurado tu email. Usa <code>/set_email</code>.")
 
     async def hide_keyboard_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Oculta el teclado de botones."""
-        await update.message.reply_text("Teclado de ayuda ocultado.", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("Teclado ocultado.", reply_markup=ReplyKeyboardRemove())
 
     def send_to_kindle(self, kindle_email_destino, file_data, filename, subject=""):
         try:
@@ -173,7 +157,7 @@ Si no haces esto, Amazon rechazará todos los envíos.
             msg['From'] = self.gmail_user
             msg['To'] = kindle_email_destino
             msg['Subject'] = subject if subject else f"Documento para Kindle: {filename}"
-            msg.attach(MIMEText(f"Enviado automáticamente por tu bot de Telegram.", 'plain'))
+            msg.attach(MIMEText(f"Enviado por tu bot de Telegram.", 'plain'))
             ctype, encoding = mimetypes.guess_type(filename)
             if ctype is None or encoding is not None: ctype = 'application/octet-stream'
             maintype, subtype = ctype.split('/', 1)
@@ -196,7 +180,7 @@ Si no haces esto, Amazon rechazará todos los envíos.
         user_id = update.effective_user.id
         user_kindle_email = get_user_email(user_id)
         if not user_kindle_email:
-            await update.message.reply_html("⚠️ No has configurado tu email. Usa <code>/set_email tu_email@kindle.com</code> para empezar.")
+            await update.message.reply_html("⚠️ No has configurado tu email. Usa <code>/set_email tu_email@kindle.com</code>.")
             return
         document = update.message.document
         filename = document.file_name
@@ -204,21 +188,21 @@ Si no haces esto, Amazon rechazará todos los envíos.
             await update.message.reply_html(f"❌ Formato de archivo no soportado.")
             return
         if document.file_size > 48 * 1024 * 1024:
-            await update.message.reply_html("❌ Archivo demasiado grande. El límite es de 50MB.")
+            await update.message.reply_html("❌ Archivo demasiado grande.")
             return
-        processing_msg = await update.message.reply_html("✅ Recibido. Procesando y enviando...")
+        processing_msg = await update.message.reply_html("✅ Recibido. Enviando a Kindle...")
         try:
             file = await context.bot.get_file(document.file_id)
             file_data = await file.download_as_bytearray()
             email_subject = "Convert" if filename.lower().endswith('.pdf') and update.message.caption and update.message.caption.lower().strip() == 'convert' else ""
             success, message = self.send_to_kindle(user_kindle_email, file_data, filename, subject=email_subject)
             if success:
-                await processing_msg.edit_text(f"✅ <b>¡Enviado a <code>{user_kindle_email}</code>!</b>\n\nEl libro aparecerá en tu Kindle en unos minutos.", parse_mode=ParseMode.HTML)
+                await processing_msg.edit_text(f"✅ <b>¡Enviado a <code>{user_kindle_email}</code>!</b>", parse_mode=ParseMode.HTML)
             else:
                 await processing_msg.edit_text(f"❌ <b>Error al enviar:</b> <i>{message}</i>", parse_mode=ParseMode.HTML)
         except Exception as e:
             logger.error(f"Error procesando documento: {e}")
-            await processing_msg.edit_text(f"❌ Ha ocurrido un error inesperado.", parse_mode=ParseMode.HTML)
+            await processing_msg.edit_text(f"❌ Error inesperado.", parse_mode=ParseMode.HTML)
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html("No he entendido eso. Si necesitas ayuda, pulsa el botón <b>/help ❓</b> o envíame un documento.", reply_markup=self.main_keyboard)
