@@ -1153,34 +1153,67 @@ Documento enviado desde tu Bot de Telegram
             logger.error(f"Error SMTP enviando a {kindle_email}: {e}")
             return False, error_msg
 
-    @track_metrics('handle_text')
+        @track_metrics('handle_text')
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Manejo mejorado de texto"""
-        text = update.message.text.lower()
-        
-        # Respuestas contextuales
-        if any(word in text for word in ['hola', 'hello', 'hi', 'buenas']):
-            await update.message.reply_text(
-                "¡Hola! 👋 Soy tu asistente de Kindle.\n"
-                "Envíame un documento para empezar.",
-                reply_markup=self.main_keyboard
-            )
-        elif any(word in text for word in ['ayuda', 'help', 'auxilio']):
+        """Manejo mejorado de texto que reconoce los botones del teclado."""
+        text = update.message.text
+        user_id = update.effective_user.id
+        is_admin = self.config.admin_user_id and user_id == self.config.admin_user_id
+
+        # ---- Lógica para los botones del menú principal ----
+        if text == "📧 Configurar Email":
+            await self.set_email_command(update, context)
+        elif text == "🔍 Ver Mi Email":
+            await self.my_email_command(update, context)
+        elif text == "📊 Mis Estadísticas":
+            await self.stats_command(update, context)
+        elif text == "❓ Ayuda":
             await self.help_command(update, context)
-        elif any(word in text for word in ['gracias', 'thanks', 'thank you']):
-            await update.message.reply_text(
-                "¡De nada! 😊 Estoy aquí para ayudarte con tus documentos Kindle."
-            )
+        elif text == "🎯 Formatos Soportados":
+            await self.formats_command(update, context)
+        elif text == "🚀 Consejos":
+            await self.tips_command(update, context)
+        
+        # ---- Lógica para los botones del menú de administrador ----
+        elif is_admin and text == "👑 Panel Admin":
+            await self.admin_command(update, context)
+        elif is_admin and text == "📈 Métricas":
+            await self.admin_command(update, context) # Llama al mismo panel
+        elif is_admin and text == "🧹 Limpiar Cache":
+            await self.clear_cache_command(update, context)
+        elif is_admin and text == "🔄 Reiniciar":
+            await update.message.reply_text("Esta función debe ser implementada por el administrador del servidor (ej. systemctl restart).")
+        elif is_admin and text == "👥 Usuarios":
+            await update.message.reply_text(f"👥 Hay un total de {get_total_users()} usuarios registrados.")
+        elif is_admin and text == "🏠 Menú Principal":
+            await update.message.reply_text("Volviendo al menú principal...", reply_markup=self.main_keyboard)
+            
+        # ---- Respuestas contextuales y mensaje por defecto ----
         else:
-            await update.message.reply_html(
-                "🤔 <b>No entiendo ese mensaje</b>\n\n"
-                "💡 <b>Puedo ayudarte con:</b>\n"
-                "• Configurar tu email de Kindle\n"
-                "• Enviar documentos a tu dispositivo\n"
-                "• Mostrar estadísticas de uso\n\n"
-                "📄 <b>Envía un documento</b> o usa los botones del menú",
-                reply_markup=self.main_keyboard
-            )
+            # Convertimos a minúsculas solo para las palabras clave
+            text_lower = text.lower()
+            if any(word in text_lower for word in ['hola', 'hello', 'hi', 'buenas']):
+                await update.message.reply_text(
+                    "¡Hola! 👋 Soy tu asistente de Kindle.\n"
+                    "Envíame un documento para empezar.",
+                    reply_markup=self.main_keyboard
+                )
+            elif any(word in text_lower for word in ['ayuda', 'help', 'auxilio']):
+                await self.help_command(update, context)
+            elif any(word in text_lower for word in ['gracias', 'thanks', 'thank you']):
+                await update.message.reply_text(
+                    "¡De nada! 😊 Estoy aquí para ayudarte con tus documentos Kindle."
+                )
+            else:
+                await update.message.reply_html(
+                    "🤔 <b>No entiendo ese mensaje</b>\n\n"
+                    "💡 <b>Puedo ayudarte con:</b>\n"
+                    "• Configurar tu email de Kindle\n"
+                    "• Enviar documentos a tu dispositivo\n"
+                    "• Mostrar estadísticas de uso\n\n"
+                    "📄 <b>Envía un documento</b> o usa los botones del menú",
+                    reply_markup=self.main_keyboard
+                )
 
 # --- PUNTO DE ENTRADA ---
 if __name__ == "__main__":
