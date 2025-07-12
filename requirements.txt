@@ -3,3 +3,5 @@ fastapi
 uvicorn
 psycopg2-binary
 Jinja2
+pydantic
+aiofiles
