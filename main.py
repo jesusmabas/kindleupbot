@@ -1,4 +1,4 @@
-# main.py
+# main.py - Versión mejorada
 import os
 import logging
 import smtplib
@@ -6,29 +6,38 @@ import mimetypes
 import asyncio
 import uvicorn
 from contextlib import asynccontextmanager
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
 from email import encoders
 import time
+import hashlib
+import json
+from pathlib import Path
+import re
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, validator
+import aiofiles
 
-from database import setup_database, set_user_email, get_user_email, get_metrics_from_db, save_metric, get_total_users
+from database import (
+    setup_database, set_user_email, get_user_email, 
+    get_metrics_from_db, save_metric, get_total_users
+)
 
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, ForceReply
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, ForceReply, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter
 
-# --- CONFIGURACIÓN Y CONSTANTES ---
+# --- CONFIGURACIÓN MEJORADA ---
 @dataclass
 class BotConfig:
     bot_token: str
@@ -38,18 +47,120 @@ class BotConfig:
     smtp_server: str = 'smtp.gmail.com'
     smtp_port: int = 587
     admin_user_id: Optional[int] = None
+    max_retries: int = 3
+    retry_delay: float = 1.0
+    rate_limit_window: int = 60  # segundos
+    rate_limit_max_requests: int = 10
+    cache_duration: int = 300  # 5 minutos
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-    handlers=[logging.FileHandler('bot.log'), logging.StreamHandler()]
-)
-logger = logging.getLogger(__name__)
+# Configuración de logging mejorada
+def setup_logging():
+    """Configura el sistema de logging con rotación de archivos"""
+    from logging.handlers import RotatingFileHandler
+    
+    # Crear directorio de logs si no existe
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    
+    # Configurar handler con rotación
+    file_handler = RotatingFileHandler(
+        log_dir / "bot.log",
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    
+    # Formato mejorado con más información
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+    )
+    file_handler.setFormatter(formatter)
+    
+    # Configurar logger principal
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    logger.addHandler(logging.StreamHandler())
+    
+    return logger
 
-SUPPORTED_FORMATS = ('.epub', '.pdf', '.mobi', '.azw', '.doc', '.docx', '.rtf', '.txt', '.html', '.htm', '.jpg', '.jpeg', '.png', '.gif', '.bmp')
-PROMPT_SET_EMAIL = "De acuerdo, por favor, introduce ahora tu email de Kindle:"
+logger = setup_logging()
 
-# --- SISTEMA DE MÉTRICAS (CORREGIDO) ---
+# Constantes mejoradas
+SUPPORTED_FORMATS = {
+    '.epub': 'application/epub+zip',
+    '.pdf': 'application/pdf',
+    '.mobi': 'application/x-mobipocket-ebook',
+    '.azw': 'application/vnd.amazon.ebook',
+    '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.rtf': 'application/rtf',
+    '.txt': 'text/plain',
+    '.html': 'text/html',
+    '.htm': 'text/html',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.bmp': 'image/bmp'
+}
+
+PROMPT_SET_EMAIL = "📧 Por favor, introduce tu email de Kindle (ejemplo: usuario@kindle.com):"
+
+# --- SISTEMA DE CACHE ---
+class CacheManager:
+    def __init__(self, default_ttl: int = 300):
+        self.cache = {}
+        self.ttl = default_ttl
+    
+    def get(self, key: str) -> Optional[Any]:
+        if key in self.cache:
+            data, timestamp = self.cache[key]
+            if time.time() - timestamp < self.ttl:
+                return data
+            else:
+                del self.cache[key]
+        return None
+    
+    def set(self, key: str, value: Any, ttl: Optional[int] = None):
+        self.cache[key] = (value, time.time())
+        if ttl:
+            # Programar eliminación automática
+            asyncio.create_task(self._auto_expire(key, ttl))
+    
+    async def _auto_expire(self, key: str, ttl: int):
+        await asyncio.sleep(ttl)
+        self.cache.pop(key, None)
+    
+    def clear(self):
+        self.cache.clear()
+
+# --- SISTEMA DE RATE LIMITING ---
+class RateLimiter:
+    def __init__(self, max_requests: int = 10, window: int = 60):
+        self.max_requests = max_requests
+        self.window = window
+        self.requests = defaultdict(list)
+    
+    def is_allowed(self, user_id: int) -> bool:
+        now = time.time()
+        user_requests = self.requests[user_id]
+        
+        # Limpiar requests antiguos
+        user_requests[:] = [req_time for req_time in user_requests if now - req_time < self.window]
+        
+        if len(user_requests) >= self.max_requests:
+            return False
+        
+        user_requests.append(now)
+        return True
+    
+    def get_remaining_time(self, user_id: int) -> int:
+        if not self.requests[user_id]:
+            return 0
+        oldest_request = min(self.requests[user_id])
+        return max(0, int(self.window - (time.time() - oldest_request)))
+
+# --- SISTEMA DE MÉTRICAS MEJORADO ---
 class MetricsCollector:
     def __init__(self):
         self.start_time = time.time()
@@ -57,353 +168,380 @@ class MetricsCollector:
         self.user_metrics = defaultdict(lambda: defaultdict(int))
         self.error_log = []
         self.response_times = []
+        self.daily_stats = defaultdict(lambda: defaultdict(int))
+        self.lock = asyncio.Lock()
 
     def load_from_db(self):
-        logger.info("Cargando métricas históricas desde la base de datos...")
-        historical_metrics = get_metrics_from_db()
-        for metric_name, user_id, value in historical_metrics:
-            self.metrics[metric_name] += value
-            if user_id:
-                self.user_metrics[user_id][metric_name] += value
-        logger.info(f"{len(historical_metrics)} registros de métricas cargados.")
+        """Carga métricas históricas desde la base de datos"""
+        try:
+            logger.info("Cargando métricas históricas desde la base de datos...")
+            historical_metrics = get_metrics_from_db()
+            for metric_name, user_id, value in historical_metrics:
+                self.metrics[metric_name] += value
+                if user_id:
+                    self.user_metrics[user_id][metric_name] += value
+            logger.info(f"{len(historical_metrics)} registros de métricas cargados.")
+        except Exception as e:
+            logger.error(f"Error cargando métricas: {e}")
 
-    # --- CORRECCIÓN AQUÍ ---
     async def _save_metric_async(self, metric_name: str, user_id: Optional[int], value: int):
-        """Ejecuta la función síncrona de guardado en un hilo separado."""
+        """Guarda métricas en la base de datos de forma asíncrona"""
         try:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, save_metric, metric_name, user_id, value)
         except Exception as e:
-            logger.error(f"Error en la tarea de guardado de métrica en segundo plano: {e}")
+            logger.error(f"Error guardando métrica {metric_name}: {e}")
 
-    def increment(self, metric_name: str, user_id: Optional[int] = None, value: int = 1):
-        """Incrementa una métrica y la guarda en BD en segundo plano."""
-        self.metrics[metric_name] += value
-        if user_id:
-            self.user_metrics[user_id][metric_name] += value
-        # Ahora creamos una tarea a partir de nuestra corutina wrapper, que es lo correcto.
-        asyncio.create_task(self._save_metric_async(metric_name, user_id, value))
+    async def increment(self, metric_name: str, user_id: Optional[int] = None, value: int = 1):
+        """Incrementa una métrica de forma thread-safe"""
+        async with self.lock:
+            self.metrics[metric_name] += value
+            if user_id:
+                self.user_metrics[user_id][metric_name] += value
+            
+            # Estadísticas diarias
+            today = datetime.now().strftime('%Y-%m-%d')
+            self.daily_stats[today][metric_name] += value
+            
+            # Guardar en BD en segundo plano
+            asyncio.create_task(self._save_metric_async(metric_name, user_id, value))
 
     def log_error(self, error_type: str, error_message: str, user_id: Optional[int] = None):
-        error_data = {'timestamp': datetime.now().isoformat(), 'type': error_type, 'message': error_message, 'user_id': user_id}
+        """Registra errores con más detalle"""
+        error_data = {
+            'timestamp': datetime.now().isoformat(),
+            'type': error_type,
+            'message': error_message,
+            'user_id': user_id,
+            'traceback': None  # Se podría agregar el traceback si es necesario
+        }
         self.error_log.insert(0, error_data)
-        if len(self.error_log) > 50: self.error_log.pop()
-        self.increment('errors_total')
-        self.increment(f'error_{error_type}', user_id)
+        if len(self.error_log) > 100:  # Aumentado de 50 a 100
+            self.error_log.pop()
+        
+        asyncio.create_task(self.increment('errors_total'))
+        asyncio.create_task(self.increment(f'error_{error_type}', user_id))
 
     def log_response_time(self, duration: float, operation: str):
-        self.response_times.insert(0, {'duration': duration, 'operation': operation})
-        if len(self.response_times) > 1000: self.response_times.pop()
+        """Registra tiempos de respuesta"""
+        self.response_times.insert(0, {
+            'duration': duration,
+            'operation': operation,
+            'timestamp': time.time()
+        })
+        if len(self.response_times) > 1000:
+            self.response_times.pop()
 
     def get_summary(self) -> Dict[str, Any]:
+        """Obtiene resumen completo de métricas"""
         uptime = time.time() - self.start_time
         avg_response_time = sum(r['duration'] for r in self.response_times) / len(self.response_times) if self.response_times else 0
+        
         return {
             'uptime_formatted': self._format_uptime(uptime),
+            'uptime_seconds': uptime,
             'total_users': get_total_users(),
             'total_documents_sent': self.metrics.get('document_sent', 0),
+            'total_documents_received': self.metrics.get('document_received', 0),
             'total_errors': self.metrics.get('errors_total', 0),
             'commands_executed': self.metrics.get('commands_total', 0),
             'avg_response_time_ms': round(avg_response_time * 1000, 2),
             'recent_errors': self.error_log[:10],
             'top_formats': self._get_top_formats(),
+            'daily_stats': dict(self.daily_stats),
+            'success_rate': self._calculate_success_rate(),
         }
 
+    def _calculate_success_rate(self) -> float:
+        """Calcula la tasa de éxito de envío de documentos"""
+        sent = self.metrics.get('document_sent', 0)
+        received = self.metrics.get('document_received', 0)
+        if received == 0:
+            return 100.0
+        return round((sent / received) * 100, 2)
+
     def get_user_stats(self, user_id: int) -> Dict[str, Any]:
+        """Obtiene estadísticas detalladas del usuario"""
         user_data = self.user_metrics.get(user_id, {})
         return {
             'documents_sent': user_data.get('document_sent', 0),
+            'documents_received': user_data.get('document_received', 0),
             'commands_used': user_data.get('commands_total', 0),
             'errors_encountered': sum(v for k, v in user_data.items() if k.startswith('error_')),
             'top_format': self._get_user_top_format(user_id),
+            'success_rate': self._calculate_user_success_rate(user_id),
+            'last_activity': self._get_user_last_activity(user_id),
         }
 
+    def _calculate_user_success_rate(self, user_id: int) -> float:
+        """Calcula la tasa de éxito para un usuario específico"""
+        user_data = self.user_metrics.get(user_id, {})
+        sent = user_data.get('document_sent', 0)
+        received = user_data.get('document_received', 0)
+        if received == 0:
+            return 100.0
+        return round((sent / received) * 100, 2)
+
+    def _get_user_last_activity(self, user_id: int) -> str:
+        """Obtiene la fecha de última actividad del usuario"""
+        # Esto sería mejor implementarlo en la base de datos
+        return "N/A"
+
     def _format_uptime(self, seconds: float) -> str:
+        """Formatea el tiempo de actividad"""
         days, rem = divmod(seconds, 86400)
         hours, rem = divmod(rem, 3600)
-        minutes, _ = divmod(rem, 60)
-        return f"{int(days)}d {int(hours)}h {int(minutes)}m"
+        minutes, seconds = divmod(rem, 60)
+        return f"{int(days)}d {int(hours)}h {int(minutes)}m {int(seconds)}s"
 
-    def _get_top_formats(self) -> list:
+    def _get_top_formats(self) -> List[Tuple[str, int]]:
+        """Obtiene los formatos más populares"""
         formats = {k.replace('format_', ''): v for k, v in self.metrics.items() if k.startswith('format_')}
-        return sorted(formats.items(), key=lambda x: x[1], reverse=True)[:5]
+        return sorted(formats.items(), key=lambda x: x[1], reverse=True)[:10]
 
     def _get_user_top_format(self, user_id: int) -> str:
+        """Obtiene el formato más usado por un usuario"""
         user_data = self.user_metrics.get(user_id, {})
         formats = {k.replace('format_', ''): v for k, v in user_data.items() if k.startswith('format_')}
         return max(formats.items(), key=lambda x: x[1])[0] if formats else "Ninguno"
 
+# Instancias globales
 metrics_collector = MetricsCollector()
+cache_manager = CacheManager()
+rate_limiter = RateLimiter()
 
-# (El resto del archivo `main.py` que te proporcioné anteriormente no necesita cambios)
-# Puedes copiarlo desde la respuesta anterior, ya que el resto de la estructura
-# con el decorador, la clase del bot, FastAPI y el ciclo de vida es correcta.
-# Para evitar un bloque de código masivo, solo he puesto aquí la clase corregida.
-# Si lo prefieres, te doy el archivo completo de nuevo.
-
-# ... [PEGAR AQUÍ EL RESTO DEL ARCHIVO main.py DE LA RESPUESTA ANTERIOR] ...
-# (Desde la definición del decorador `track_metrics` hasta el final)
-# --- DECORADOR PARA MÉTRICAS ---
+# --- DECORADOR MEJORADO PARA MÉTRICAS ---
 def track_metrics(operation_name: str):
+    """Decorador mejorado para tracking de métricas"""
     def decorator(func):
         async def wrapper(self, update: Update, *args, **kwargs):
             start_time = time.time()
             user_id = update.effective_user.id if update and hasattr(update, 'effective_user') else None
-            metrics_collector.increment('commands_total', user_id)
-            metrics_collector.increment(operation_name, user_id)
+            
+            # Rate limiting
+            if user_id and not rate_limiter.is_allowed(user_id):
+                remaining_time = rate_limiter.get_remaining_time(user_id)
+                await update.message.reply_text(
+                    f"🚫 Has excedido el límite de solicitudes. "
+                    f"Intenta de nuevo en {remaining_time} segundos."
+                )
+                return
+            
+            await metrics_collector.increment('commands_total', user_id)
+            await metrics_collector.increment(operation_name, user_id)
+            
             try:
-                return await func(self, update, *args, **kwargs)
+                result = await func(self, update, *args, **kwargs)
+                await metrics_collector.increment(f'{operation_name}_success', user_id)
+                return result
             except Exception as e:
                 metrics_collector.log_error(operation_name, str(e), user_id)
                 logger.error(f"Error en {operation_name} para usuario {user_id}: {e}", exc_info=True)
+                
+                # Mensaje de error más amigable
+                if hasattr(update, 'message') and update.message:
+                    await update.message.reply_text(
+                        "😔 Ocurrió un error inesperado. El equipo técnico ha sido notificado."
+                    )
                 raise
             finally:
                 duration = time.time() - start_time
                 metrics_collector.log_response_time(duration, operation_name)
+        
         return wrapper
     return decorator
 
-# --- MODELOS PYDANTIC ---
+# --- MODELOS PYDANTIC MEJORADOS ---
 class StatusResponse(BaseModel):
     status: str
     bot_username: Optional[str] = None
     metrics: Optional[Dict[str, Any]] = None
+    version: str = "2.2.0"
 
-# --- VALIDACIÓN DE CONFIGURACIÓN ---
+class EmailValidationRequest(BaseModel):
+    email: str
+    
+    @validator('email')
+    def validate_email(cls, v):
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_pattern, v):
+            raise ValueError('Formato de email inválido')
+        return v.lower()
+
+# --- VALIDADORES MEJORADOS ---
+class EmailValidator:
+    @staticmethod
+    def validate_email(email: str) -> bool:
+        """Validación mejorada de email"""
+        if not email or len(email) < 5:
+            return False
+        
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return bool(re.match(email_pattern, email))
+    
+    @staticmethod
+    def is_kindle_email(email: str) -> bool:
+        """Verifica si es un email de Kindle"""
+        kindle_domains = ['@kindle.com', '@free.kindle.com']
+        return any(domain in email.lower() for domain in kindle_domains)
+
+class FileValidator:
+    @staticmethod
+    def validate_file(filename: str, file_size: int, max_size: int) -> Tuple[bool, str]:
+        """Validación completa de archivos"""
+        if not filename:
+            return False, "Nombre de archivo vacío"
+        
+        ext = Path(filename).suffix.lower()
+        if ext not in SUPPORTED_FORMATS:
+            return False, f"Formato {ext} no soportado"
+        
+        if file_size > max_size:
+            return False, f"Archivo muy grande ({file_size / 1024**2:.1f}MB > {max_size / 1024**2:.1f}MB)"
+        
+        return True, "OK"
+
+# --- CONFIGURACIÓN MEJORADA ---
 def validate_config() -> BotConfig:
-    bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-    gmail_user = os.getenv('GMAIL_USER')
-    gmail_password = os.getenv('GMAIL_APP_PASSWORD')
+    """Validación mejorada de configuración"""
+    required_vars = {
+        'TELEGRAM_BOT_TOKEN': 'bot_token',
+        'GMAIL_USER': 'gmail_user',
+        'GMAIL_APP_PASSWORD': 'gmail_password'
+    }
+    
+    config_data = {}
+    missing_vars = []
+    
+    for env_var, config_key in required_vars.items():
+        value = os.getenv(env_var)
+        if not value:
+            missing_vars.append(env_var)
+        else:
+            config_data[config_key] = value
+    
+    if missing_vars:
+        raise ValueError(f"Faltan variables de entorno: {', '.join(missing_vars)}")
+    
+    # Variables opcionales
     admin_user_id = os.getenv('ADMIN_USER_ID')
+    if admin_user_id:
+        try:
+            config_data['admin_user_id'] = int(admin_user_id)
+        except ValueError:
+            logger.warning("ADMIN_USER_ID no es un número válido")
     
-    if not all([bot_token, gmail_user, gmail_password]):
-        raise ValueError("Faltan variables de entorno esenciales (BOT_TOKEN, GMAIL_USER, GMAIL_APP_PASSWORD)")
+    # Configuraciones adicionales
+    config_data['max_file_size'] = int(os.getenv('MAX_FILE_SIZE', 50 * 1024 * 1024))  # 50MB por defecto
+    config_data['max_retries'] = int(os.getenv('MAX_RETRIES', 3))
+    config_data['rate_limit_max_requests'] = int(os.getenv('RATE_LIMIT_MAX_REQUESTS', 10))
     
-    return BotConfig(
-        bot_token=bot_token, gmail_user=gmail_user, gmail_password=gmail_password,
-        admin_user_id=int(admin_user_id) if admin_user_id else None
-    )
+    return BotConfig(**config_data)
 
-# --- GESTOR DE CICLO DE VIDA ---
+# --- GESTOR DE CICLO DE VIDA MEJORADO ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Gestor de ciclo de vida mejorado"""
     logger.info("🚀 Iniciando servidor...")
-    config = validate_config()
-    setup_database()
-    metrics_collector.load_from_db()
-    bot_instance = KindleEmailBot(config)
-    await bot_instance.initialize()
-    app.state.bot = bot_instance
-    app.state.config = config
-    logger.info("✅ Servidor iniciado correctamente")
-    yield
-    logger.info("🛑 Cerrando servidor...")
-    await bot_instance.shutdown()
-    logger.info("✅ Servidor cerrado correctamente")
+    
+    try:
+        # Validar configuración
+        config = validate_config()
+        logger.info("✅ Configuración validada")
+        
+        # Configurar base de datos
+        setup_database()
+        logger.info("✅ Base de datos configurada")
+        
+        # Cargar métricas
+        metrics_collector.load_from_db()
+        logger.info("✅ Métricas cargadas")
+        
+        # Inicializar bot
+        bot_instance = KindleEmailBot(config)
+        await bot_instance.initialize()
+        logger.info("✅ Bot inicializado")
+        
+        # Almacenar en el estado de la aplicación
+        app.state.bot = bot_instance
+        app.state.config = config
+        app.state.metrics = metrics_collector
+        app.state.cache = cache_manager
+        
+        logger.info("✅ Servidor iniciado correctamente")
+        yield
+        
+    except Exception as e:
+        logger.error(f"Error durante el inicio: {e}", exc_info=True)
+        raise
+    finally:
+        logger.info("🛑 Cerrando servidor...")
+        if hasattr(app.state, 'bot'):
+            await app.state.bot.shutdown()
+        logger.info("✅ Servidor cerrado correctamente")
 
-# --- APLICACIÓN FASTAPI ---
-app = FastAPI(title="Kindle Bot API", version="2.1.0", lifespan=lifespan)
+# --- APLICACIÓN FASTAPI MEJORADA ---
+app = FastAPI(
+    title="Kindle Bot API",
+    version="2.2.0",
+    description="Bot de Telegram para envío de documentos a Kindle",
+    lifespan=lifespan
+)
+
+# Middleware CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 templates = Jinja2Templates(directory="templates")
 
 @app.get("/", response_model=StatusResponse)
 async def read_root():
-    bot_info = await app.state.bot.get_bot_info()
-    summary = metrics_collector.get_summary()
-    return StatusResponse(
-        status="✅ Bot activo y funcionando",
-        bot_username=bot_info.username if bot_info else None,
-        metrics={'uptime': summary['uptime_formatted'], **summary}
-    )
+    """Endpoint de estado principal"""
+    try:
+        bot_info = await app.state.bot.get_bot_info()
+        summary = metrics_collector.get_summary()
+        
+        return StatusResponse(
+            status="✅ Bot activo y funcionando",
+            bot_username=bot_info.username if bot_info else None,
+            metrics=summary
+        )
+    except Exception as e:
+        logger.error(f"Error en endpoint raíz: {e}")
+        return StatusResponse(
+            status="❌ Error en el servicio",
+            metrics={"error": str(e)}
+        )
+
+@app.get("/health")
+async def health_check():
+    """Endpoint de health check"""
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request):
+    """Dashboard web"""
     return templates.TemplateResponse("dashboard.html", {"request": request})
 
 @app.get("/api/metrics-data", response_class=JSONResponse)
 async def metrics_data():
+    """Endpoint de métricas JSON"""
     return metrics_collector.get_summary()
 
-# --- CLASE PRINCIPAL DEL BOT (COMPLETADA) ---
+@app.post("/api/clear-cache")
+async def clear_cache():
+    """Endpoint para limpiar caché"""
+    cache_manager.clear()
+    return {"message": "Caché limpiado exitosamente"}
+
+# Continuará en la siguiente parte...
+
+# --- CLASE PRINCIPAL DEL BOT (MEJORADA) ---
 class KindleEmailBot:
     def __init__(self, config: BotConfig):
-        self.config = config
-        self.application = Application.builder().token(self.config.bot_token).build()
-        self.main_keyboard = ReplyKeyboardMarkup(
-            [["/set_email 📧", "/my_email 🧐"], ["/help ❓", "/stats 📊"]], 
-            resize_keyboard=True
-        )
-        
-    async def initialize(self):
-        handlers = [
-            CommandHandler("start", self.start), CommandHandler("help", self.help_command),
-            CommandHandler("set_email", self.set_email_command), CommandHandler("my_email", self.my_email_command),
-            CommandHandler("stats", self.stats_command), CommandHandler("admin", self.admin_command),
-            CommandHandler("hide_keyboard", self.hide_keyboard_command),
-            MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, self.handle_email_input),
-            MessageHandler(filters.Document.ALL, self.handle_document),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text),
-        ]
-        self.application.add_handlers(handlers)
-        await self.application.initialize()
-        await self.application.updater.start_polling(drop_pending_updates=True)
-        await self.application.start()
-        logger.info("🤖 Bot inicializado correctamente")
-
-    async def shutdown(self):
-        if self.application: await self.application.shutdown()
-
-    async def get_bot_info(self):
-        return await self.application.bot.get_me() if self.application else None
-
-    @track_metrics('command_start')
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_html(f"""
-👋 ¡Hola, {update.effective_user.mention_html()}!
-📚 <b>Asistente de Envío a Kindle v2.1</b>
-Para empezar:
-1. Usa <b>/set_email 📧</b> para configurar tu email.
-2. Autoriza mi email en Amazon: <code>{self.config.gmail_user}</code>
-""", reply_markup=self.main_keyboard)
-
-    @track_metrics('command_help')
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_html(f"""
-🤔 <b>Guía Completa</b>
-<b>Uso:</b>
-1. Configura tu email con <code>/set_email</code>.
-2. Envía un documento.
-<b>Comandos:</b>
-• <code>/stats</code> - Tus estadísticas.
-• <code>/my_email</code> - Ver tu email.
-• <code>/hide_keyboard</code> - Ocultar botones.
-<b>Tip PDF:</b> Escribe <code>convert</code> en la descripción para optimizar la lectura.
-<b>¡Importante!</b> Autoriza mi email en Amazon: <code>{self.config.gmail_user}</code>
-""")
-
-    @track_metrics('command_set_email')
-    async def set_email_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(PROMPT_SET_EMAIL, reply_markup=ForceReply(selective=True))
-
-    @track_metrics('handle_email_input')
-    async def handle_email_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not (update.message.reply_to_message and update.message.reply_to_message.text == PROMPT_SET_EMAIL): return
-        user_id = update.effective_user.id
-        kindle_email = update.message.text.strip()
-        if not self._validate_email(kindle_email):
-            metrics_collector.increment('email_validation_failed', user_id)
-            return await update.message.reply_html("❌ Formato de email inválido. Inténtalo de nuevo.")
-        if set_user_email(user_id, kindle_email):
-            metrics_collector.increment('email_set_success', user_id)
-            await update.message.reply_html(f"✅ Email guardado: <code>{kindle_email}</code>")
-        else:
-            await update.message.reply_html("❌ Error al guardar el email.")
-
-    @track_metrics('command_my_email')
-    async def my_email_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        email = get_user_email(update.effective_user.id)
-        await update.message.reply_html(f"📧 Tu email es: <code>{email}</code>" if email else "❌ No has configurado un email.")
-
-    @track_metrics('command_stats')
-    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        stats = metrics_collector.get_user_stats(update.effective_user.id)
-        await update.message.reply_html(f"""
-📊 <b>Tus Estadísticas</b>
-• <b>Documentos enviados:</b> {stats['documents_sent']}
-• <b>Comandos usados:</b> {stats['commands_used']}
-• <b>Formato preferido:</b> {stats['top_format']}
-• <b>Errores encontrados:</b> {stats['errors_encountered']}
-""")
-
-    @track_metrics('command_admin')
-    async def admin_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        if not self.config.admin_user_id or user_id != self.config.admin_user_id:
-            return await update.message.reply_text("🚫 Acceso denegado.")
-        
-        summary = metrics_collector.get_summary()
-        top_formats = "\n".join([f"  - <code>{f}: {c}</code>" for f, c in summary['top_formats']]) if summary['top_formats'] else "Ninguno"
-        await update.message.reply_html(f"""
-👑 <b>Panel de Administrador</b>
-• <b>Tiempo activo:</b> {summary['uptime_formatted']}
-• <b>Usuarios totales:</b> {summary['total_users']}
-• <b>Documentos totales:</b> {summary['total_documents_sent']}
-• <b>Errores totales:</b> {summary['total_errors']}
-• <b>T. Respuesta (avg):</b> {summary['avg_response_time_ms']} ms
-<b>Formatos más populares:</b>
-{top_formats}
-""")
-
-    @track_metrics('command_hide_keyboard')
-    async def hide_keyboard_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("🙈 Teclado ocultado.", reply_markup=ReplyKeyboardRemove())
-
-    @track_metrics('handle_document')
-    async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        user_kindle_email = get_user_email(user_id)
-        if not user_kindle_email:
-            return await update.message.reply_html("⚠️ Usa <code>/set_email</code> primero.")
-        
-        doc = update.message.document
-        if doc.file_size > self.config.max_file_size:
-            return await update.message.reply_html(f"❌ Archivo muy grande (> {self.config.max_file_size // 1024**2}MB).")
-        
-        ext = os.path.splitext(doc.file_name)[1].lower()
-        if ext not in SUPPORTED_FORMATS:
-            return await update.message.reply_html("❌ Formato no soportado.")
-        
-        metrics_collector.increment('document_received', user_id)
-        metrics_collector.increment(f'format_{ext.replace(".", "")}', user_id)
-        
-        processing_msg = await update.message.reply_html(f"⏳ Procesando <code>{doc.file_name}</code>...")
-        try:
-            file_data = await (await context.bot.get_file(doc.file_id)).download_as_bytearray()
-            subject = "Convert" if doc.file_name.lower().endswith('.pdf') and update.message.caption and update.message.caption.lower() == 'convert' else ""
-            success, msg = await self._send_to_kindle_async(user_kindle_email, file_data, doc.file_name, subject)
-            if success:
-                metrics_collector.increment('document_sent', user_id)
-                await processing_msg.edit_text(f"✅ ¡<b>{doc.file_name}</b> enviado!", parse_mode=ParseMode.HTML)
-            else:
-                await processing_msg.edit_text(f"❌ <b>Error al enviar:</b> <i>{msg}</i>", parse_mode=ParseMode.HTML)
-        except Exception as e:
-            await processing_msg.edit_text("❌ Error inesperado durante el proceso.")
-            raise e
-
-    @track_metrics('handle_text')
-    async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_html("🤔 No entiendo. Usa los botones o envíame un documento.", reply_markup=self.main_keyboard)
-
-    def _validate_email(self, email: str) -> bool:
-        return '@' in email and '.' in email and len(email) > 5
-
-    async def _send_to_kindle_async(self, kindle_email: str, file_data: bytes, filename: str, subject: str) -> Tuple[bool, str]:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._send_to_kindle_sync, kindle_email, file_data, filename, subject)
-
-    def _send_to_kindle_sync(self, kindle_email: str, file_data: bytes, filename: str, subject: str) -> Tuple[bool, str]:
-        try:
-            msg = MIMEMultipart()
-            msg['From'] = self.config.gmail_user
-            msg['To'] = kindle_email
-            msg['Subject'] = subject or f"Documento Kindle: {filename}"
-            msg.attach(MIMEText(f"Enviado por tu bot de Telegram.", 'plain'))
-            ctype, _ = mimetypes.guess_type(filename)
-            maintype, subtype = (ctype or 'application/octet-stream').split('/', 1)
-            part = MIMEBase(maintype, subtype)
-            part.set_payload(file_data)
-            encoders.encode_base64(part)
-            part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
-            msg.attach(part)
-            with smtplib.SMTP(self.config.smtp_server, self.config.smtp_port) as server:
-                server.starttls()
-                server.login(self.config.gmail_user, self.config.gmail_password)
-                server.send_message(msg)
-            return True, "Enviado con éxito"
-        except Exception as e:
-            logger.error(f"Error SMTP enviando a {kindle_email}: {e}")
-            return False, str(e)
-
-# --- PUNTO DE ENTRADA ---
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+   
