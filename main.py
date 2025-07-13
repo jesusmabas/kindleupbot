@@ -1006,7 +1006,7 @@ class KindleEmailBot:
                     f"✅ <b>¡Documento enviado exitosamente!</b>\n\n"
                     f"📄 <b>Archivo:</b> <code>{doc.file_name}</code>\n"
                     f"📧 <b>Enviado a:</b> <code>{user_kindle_email}</code>\n"
-                    f"🚀 <b>Sincronizando con tu Kindle...</b>",
+                    f"🚀 <b>En un momento lo tendrás en tu Kindle...</b>",
                     parse_mode=ParseMode.HTML
                 )
             else:
