@@ -1,52 +1,69 @@
-# database.py
+# database.py - VERSIÓN MEJORADA Y CORREGIDA
 import os
 import logging
 import psycopg2
-from typing import List, Tuple, Any
+from typing import List, Tuple, Any, Optional
+from contextlib import contextmanager
 
 # --- CONFIGURACIÓN ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 logger = logging.getLogger(__name__)
 
-# --- FUNCIONES DE CONEXIÓN Y CONFIGURACIÓN ---
+# --- GESTOR DE CONTEXTO PARA CONEXIONES ---
+@contextmanager
 def get_db_connection():
-    """Establece una conexión con la base de datos PostgreSQL."""
+    """
+    Proporciona una conexión a la base de datos como un gestor de contexto,
+    asegurando que se cierre correctamente.
+    """
+    if not DATABASE_URL:
+        logger.error("La variable de entorno DATABASE_URL no está configurada.")
+        raise ValueError("DATABASE_URL no está configurada.")
+    
+    conn = None
     try:
         conn = psycopg2.connect(DATABASE_URL)
-        return conn
-    except psycopg2.OperationalError as e:
-        logger.error("Error crítico de conexión a la base de datos: %s", e)
-        raise e
+        yield conn
+        conn.commit()
+    except Exception as e:
+        if conn:
+            conn.rollback() # Revierte los cambios si hubo un error
+        logger.error("Error en la transacción de la base de datos: %s", e)
+        raise # Vuelve a lanzar la excepción para que el llamador la maneje
+    finally:
+        if conn:
+            conn.close()
 
 def setup_database():
     """Crea las tablas 'users' y 'metrics' si no existen."""
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            # Tabla de usuarios
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    kindle_email TEXT NOT NULL,
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    last_activity_at TIMESTAMPTZ
-                )
-            """)
-            # Nueva tabla para métricas
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS metrics (
-                    id SERIAL PRIMARY KEY,
-                    timestamp TIMESTAMPTZ DEFAULT NOW(),
-                    metric_name TEXT NOT NULL,
-                    user_id BIGINT,
-                    value INTEGER DEFAULT 1
-                )
-            """)
-        conn.commit()
-        conn.close()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Tabla de usuarios
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id BIGINT PRIMARY KEY,
+                        kindle_email TEXT NOT NULL,
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        last_activity_at TIMESTAMPTZ
+                    )
+                """)
+                # Nueva tabla para métricas
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS metrics (
+                        id SERIAL PRIMARY KEY,
+                        timestamp TIMESTAMPTZ DEFAULT NOW(),
+                        metric_name TEXT NOT NULL,
+                        user_id BIGINT,
+                        value INTEGER DEFAULT 1
+                    )
+                """)
         logger.info("Base de datos y tablas ('users', 'metrics') verificadas/creadas.")
     except Exception as e:
-        logger.error("Error al configurar la base de datos: %s", e)
+        # El error ya se loguea en get_db_connection, aquí solo informamos del contexto.
+        logger.error("Fallo al ejecutar setup_database: %s", e)
+        # Es un error crítico, así que lo relanzamos para detener la app si es necesario
+        raise
 
 # --- FUNCIONES DE USUARIO ---
 def set_user_email(user_id: int, kindle_email: str) -> bool:
@@ -58,74 +75,63 @@ def set_user_email(user_id: int, kindle_email: str) -> bool:
             last_activity_at = NOW();
     """
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(sql, (user_id, kindle_email))
-        conn.commit()
-        conn.close()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (user_id, kindle_email))
         return True
     except Exception as e:
-        logger.error("Error al guardar email para el usuario %s: %s", user_id, e)
+        # El error ya se loguea, aquí solo indicamos que la operación falló.
         return False
 
-def get_user_email(user_id: int) -> str or None:
+def get_user_email(user_id: int) -> Optional[str]:
     """Obtiene el email de Kindle para un usuario y actualiza su actividad."""
-    email = None
+    sql_select = "SELECT kindle_email FROM users WHERE user_id = %s;"
+    sql_update = "UPDATE users SET last_activity_at = NOW() WHERE user_id = %s;"
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("SELECT kindle_email FROM users WHERE user_id = %s;", (user_id,))
-            result = cur.fetchone()
-            email = result[0] if result else None
-            
-            # Actualizar la última actividad
-            if email:
-                cur.execute("UPDATE users SET last_activity_at = NOW() WHERE user_id = %s;", (user_id,))
-                conn.commit()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql_select, (user_id,))
+                result = cur.fetchone()
+                email = result[0] if result else None
+                
+                # Actualizar la última actividad solo si se encontró el email
+                if email:
+                    cur.execute(sql_update, (user_id,))
+        return email
     except Exception as e:
-        logger.error("Error al obtener email para el usuario %s: %s", user_id, e)
-    finally:
-        if conn:
-            conn.close()
-    return email
+        return None
 
 def get_total_users() -> int:
     """Obtiene el número total de usuarios registrados."""
     sql = "SELECT COUNT(*) FROM users;"
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            result = cur.fetchone()
-        conn.close()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                result = cur.fetchone()
         return result[0] if result else 0
     except Exception as e:
-        logger.error(f"Error al contar usuarios: {e}")
         return 0
 
 # --- FUNCIONES DE MÉTRICAS ---
-def save_metric(metric_name: str, user_id: int or None, value: int):
+def save_metric(metric_name: str, user_id: Optional[int], value: int):
     """Guarda un evento de métrica en la base de datos."""
     sql = "INSERT INTO metrics (metric_name, user_id, value) VALUES (%s, %s, %s);"
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(sql, (metric_name, user_id, value))
-        conn.commit()
-        conn.close()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (metric_name, user_id, value))
     except Exception as e:
-        logger.error(f"Error al guardar métrica '{metric_name}': {e}")
+        # Evitamos que un fallo al guardar métricas detenga la app
+        pass
 
 def get_metrics_from_db() -> List[Tuple[Any, ...]]:
     """Obtiene todos los registros de métricas de la base de datos."""
     sql = "SELECT metric_name, user_id, value FROM metrics;"
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            results = cur.fetchall()
-        conn.close()
-        return results
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                return cur.fetchall()
     except Exception as e:
-        logger.error(f"Error al obtener métricas de la BD: {e}")
         return []
