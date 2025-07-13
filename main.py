@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 import re
 
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,65 +34,46 @@ from database import (
     get_metrics_from_db, save_metric, get_total_users
 )
 
-from telegram import Update
+# --- IMPORTACIONES COMPLETAS Y CORRECTAS ---
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, ForceReply, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
-from telegram.error import TelegramError, RetryAfter
+from telegram.error import TelegramError
 
 # Configuración de logging mejorada
 def setup_logging():
     """Configura el sistema de logging con rotación de archivos"""
     from logging.handlers import RotatingFileHandler
-
-    # Crear directorio de logs si no existe
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
-
-    # Configurar handler con rotación
     file_handler = RotatingFileHandler(
-        log_dir / "bot.log",
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5
+        log_dir / "bot.log", maxBytes=10*1024*1024, backupCount=5
     )
-
-    # Formato mejorado con más información
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
     )
     file_handler.setFormatter(formatter)
-
-    # Configurar logger principal
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     logger.addHandler(file_handler)
     logger.addHandler(logging.StreamHandler())
-
     return logger
 
 logger = setup_logging()
 
-# Constantes mejoradas
+# Constantes
 SUPPORTED_FORMATS = {
-    '.epub': 'application/epub+zip',
-    '.pdf': 'application/pdf',
-    '.mobi': 'application/x-mobipocket-ebook',
-    '.azw': 'application/vnd.amazon.ebook',
-    '.doc': 'application/msword',
-    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    '.rtf': 'application/rtf',
-    '.txt': 'text/plain',
-    '.html': 'text/html',
-    '.htm': 'text/html',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.png': 'image/png',
-    '.gif': 'image/gif',
-    '.bmp': 'image/bmp'
+    '.epub': 'application/epub+zip', '.pdf': 'application/pdf', '.mobi': 'application/x-mobipocket-ebook',
+    '.azw': 'application/vnd.amazon.ebook', '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.rtf': 'application/rtf',
+    '.txt': 'text/plain', '.html': 'text/html', '.htm': 'text/html', '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.bmp': 'image/bmp'
 }
-
 PROMPT_SET_EMAIL = "📧 Por favor, introduce tu email de Kindle (ejemplo: usuario@kindle.com):"
 
-# --- SISTEMA DE CACHE ---
+
+# --- Clases de utilidad (Cache, RateLimiter, Metrics, Validators) ---
+# (Estas clases no necesitan cambios y se omiten aquí por brevedad, pero deben estar en tu archivo)
 class CacheManager:
     def __init__(self, default_ttl: int = 300):
         self.cache = {}
@@ -119,7 +100,6 @@ class CacheManager:
     def clear(self):
         self.cache.clear()
 
-# --- SISTEMA DE RATE LIMITING ---
 class RateLimiter:
     def __init__(self, max_requests: int, window: int):
         self.max_requests = max_requests
@@ -141,7 +121,6 @@ class RateLimiter:
         oldest_request = min(self.requests[user_id])
         return max(0, int(self.window - (time.time() - oldest_request)))
 
-# --- SISTEMA DE MÉTRICAS MEJORADO ---
 class MetricsCollector:
     def __init__(self):
         self.start_time = time.time()
@@ -251,12 +230,29 @@ class MetricsCollector:
         formats = {k.replace('format_', ''): v for k, v in user_data.items() if k.startswith('format_')}
         return max(formats.items(), key=lambda x: x[1])[0] if formats else "Ninguno"
 
+class EmailValidator:
+    @staticmethod
+    def validate_email(email: str) -> bool:
+        if not email or len(email) < 5: return False
+        return bool(re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email))
+    @staticmethod
+    def is_kindle_email(email: str) -> bool:
+        return any(domain in email.lower() for domain in ['@kindle.com', '@free.kindle.com'])
+
+class FileValidator:
+    @staticmethod
+    def validate_file(filename: str, file_size: int, max_size: int) -> Tuple[bool, str]:
+        if not filename: return False, "Nombre de archivo vacío"
+        ext = Path(filename).suffix.lower()
+        if ext not in SUPPORTED_FORMATS: return False, f"Formato {ext} no soportado"
+        if file_size > max_size: return False, f"Archivo muy grande ({file_size / 1024**2:.1f}MB > {max_size / 1024**2:.1f}MB)"
+        return True, "OK"
+
 # Instancias globales
 metrics_collector = MetricsCollector()
 cache_manager = CacheManager(default_ttl=settings.CACHE_DURATION)
 rate_limiter = RateLimiter(max_requests=settings.RATE_LIMIT_MAX_REQUESTS, window=settings.RATE_LIMIT_WINDOW)
 
-# --- DECORADOR PARA MÉTRICAS ---
 def track_metrics(operation_name: str):
     def decorator(func):
         async def wrapper(self, update: Update, *args, **kwargs):
@@ -284,39 +280,6 @@ def track_metrics(operation_name: str):
         return wrapper
     return decorator
 
-# --- MODELOS PYDANTIC ---
-class StatusResponse(BaseModel):
-    status: str
-    bot_username: Optional[str] = None
-    metrics: Optional[Dict[str, Any]] = None
-    version: str = "2.2.0"
-
-class EmailValidationRequest(BaseModel):
-    email: str
-    @field_validator('email')
-    def validate_email(cls, v):
-        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', v):
-            raise ValueError('Formato de email inválido')
-        return v.lower()
-
-# --- VALIDADORES ---
-class EmailValidator:
-    @staticmethod
-    def validate_email(email: str) -> bool:
-        if not email or len(email) < 5: return False
-        return bool(re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email))
-    @staticmethod
-    def is_kindle_email(email: str) -> bool:
-        return any(domain in email.lower() for domain in ['@kindle.com', '@free.kindle.com'])
-
-class FileValidator:
-    @staticmethod
-    def validate_file(filename: str, file_size: int, max_size: int) -> Tuple[bool, str]:
-        if not filename: return False, "Nombre de archivo vacío"
-        ext = Path(filename).suffix.lower()
-        if ext not in SUPPORTED_FORMATS: return False, f"Formato {ext} no soportado"
-        if file_size > max_size: return False, f"Archivo muy grande ({file_size / 1024**2:.1f}MB > {max_size / 1024**2:.1f}MB)"
-        return True, "OK"
 
 # --- CLASE PRINCIPAL DEL BOT (ADAPTADA PARA WEBHOOKS) ---
 class KindleEmailBot:
@@ -342,42 +305,39 @@ class KindleEmailBot:
 
     async def initialize_handlers(self):
         """Inicializa solo los handlers, sin iniciar polling."""
-        try:
-            handlers = [
-                CommandHandler("start", self.start), CommandHandler("help", self.help_command),
-                CommandHandler("set_email", self.set_email_command), CommandHandler("my_email", self.my_email_command),
-                CommandHandler("stats", self.stats_command), CommandHandler("admin", self.admin_command),
-                CommandHandler("hide_keyboard", self.hide_keyboard_command), CommandHandler("formats", self.formats_command),
-                CommandHandler("tips", self.tips_command), CommandHandler("clear_cache", self.clear_cache_command),
-                CallbackQueryHandler(self.handle_callback),
-                MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, self.handle_email_input),
-                MessageHandler(filters.Document.ALL, self.handle_document),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text),
-            ]
-            for handler in handlers: self.application.add_handler(handler)
-            await self.application.initialize()
-            logger.info("🤖 Handlers del bot inicializados correctamente")
-        except Exception as e:
-            logger.error(f"Error inicializando handlers del bot: {e}", exc_info=True)
-            raise
+        handlers = [
+            CommandHandler("start", self.start), CommandHandler("help", self.help_command),
+            CommandHandler("set_email", self.set_email_command), CommandHandler("my_email", self.my_email_command),
+            CommandHandler("stats", self.stats_command), CommandHandler("admin", self.admin_command),
+            CommandHandler("hide_keyboard", self.hide_keyboard_command), CommandHandler("formats", self.formats_command),
+            CommandHandler("tips", self.tips_command), CommandHandler("clear_cache", self.clear_cache_command),
+            CallbackQueryHandler(self.handle_callback),
+            MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, self.handle_email_input),
+            MessageHandler(filters.Document.ALL, self.handle_document),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text),
+        ]
+        for handler in handlers:
+            self.application.add_handler(handler)
+        await self.application.initialize()
+        logger.info("🤖 Handlers del bot inicializados correctamente")
 
     async def shutdown(self):
-        """Cierre limpio del bot (sin detener polling)."""
+        """Cierre limpio del bot."""
         logger.info("Iniciando secuencia de apagado del bot...")
-        try:
-            if self.application: await self.application.shutdown()
-            logger.info("🤖 Bot cerrado correctamente")
-        except Exception as e:
-            logger.error(f"Error inesperado cerrando el bot: {e}", exc_info=True)
+        if self.application:
+            await self.application.shutdown()
+        logger.info("🤖 Bot cerrado correctamente")
 
     async def get_bot_info(self):
-        try: return await self.application.bot.get_me() if self.application else None
-        except Exception as e:
+        """Obtiene información del bot."""
+        try:
+            return await self.application.bot.get_me() if self.application else None
+        except TelegramError as e:
             logger.error(f"Error obteniendo info del bot: {e}")
             return None
-    
-    # --- LA LÓGICA DE LOS HANDLERS NO CAMBIA ---
-    # (Los métodos start, help_command, handle_document, etc. son idénticos al original)
+
+    # --- La lógica de los Handlers (start, help, etc.) va aquí y no cambia ---
+    # (Los pego todos para que el archivo esté completo)
     @track_metrics('command_start')
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
@@ -390,8 +350,6 @@ class KindleEmailBot:
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text = f"📖 <b>Guía Completa del Kindle Bot</b>\n\n🔧 <b>Comandos Principales:</b>\n• <b>Configurar Email</b> - Establece tu email de Kindle\n• <b>Ver Mi Email</b> - Muestra tu email actual\n• <b>Mis Estadísticas</b> - Tus métricas personales\n• <b>Formatos Soportados</b> - Lista de formatos válidos\n\n📋 <b>Cómo usar:</b>\n1. <b>Configura tu email</b> usando el botón correspondiente\n2. <b>Autoriza mi email</b> en tu cuenta de Amazon Kindle\n3. <b>Envía cualquier documento</b> compatible\n\n💡 <b>Consejos Pro:</b>\n• Usa \"convert\" en la descripción de PDFs para optimizar\n• Los archivos se envían directamente a tu biblioteca\n• Máximo {self.config.MAX_FILE_SIZE // 1024**2}MB por archivo\n\n🔑 <b>Email a autorizar:</b>\n<code>{self.config.GMAIL_USER}</code>\n\n❓ <b>¿Problemas?</b> Verifica que el email esté autorizado en tu cuenta de Amazon."
         await update.message.reply_html(help_text)
-
-    # (Y así sucesivamente con el resto de handlers... los pego para que esté completo)
 
     @track_metrics('command_formats')
     async def formats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -614,22 +572,42 @@ class KindleEmailBot:
             elif any(word in text_lower for word in ['gracias', 'thanks', 'thank you']): await update.message.reply_text("¡De nada! 😊 Estoy aquí para ayudarte.")
             else: await update.message.reply_html("🤔 <b>No entiendo ese mensaje</b>\n\n💡 <b>Puedo ayudarte con:</b>\n• Configurar tu email de Kindle\n• Enviar documentos a tu dispositivo\n• Mostrar estadísticas de uso\n\n📄 <b>Envía un documento</b> o usa los botones del menú", reply_markup=self.main_keyboard)
 
+# --- MODELOS PYDANTIC ---
+class StatusResponse(BaseModel):
+    status: str
+    bot_username: Optional[str] = None
+    metrics: Optional[Dict[str, Any]] = None
+    version: str = "2.2.0"
+
+class EmailValidationRequest(BaseModel):
+    email: str
+    @field_validator('email')
+    def validate_email(cls, v):
+        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', v):
+            raise ValueError('Formato de email inválido')
+        return v.lower()
+
+
 # --- GESTOR DE CICLO DE VIDA (LIFESPAN) PARA WEBHOOK ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Gestor de ciclo de vida para configurar y limpiar el webhook."""
     logger.info("🚀 Iniciando servidor y configurando webhook...")
+    
+    # --- Inicialización de toda la lógica del bot ---
+    logger.info("✅ Configuración cargada y validada")
+    setup_database()
+    logger.info("✅ Base de datos configurada")
+    metrics_collector.load_from_db()
+    logger.info("✅ Métricas cargadas")
+    
+    bot_instance = KindleEmailBot(settings)
+    await bot_instance.initialize_handlers()
+    
+    # --- Configuración del Webhook ---
+    # El webhook se configura DESPUÉS de que el bot esté listo para recibir updates.
+    webhook_url = f"{settings.WEBHOOK_URL}/telegram" # URL más simple
     try:
-        logger.info("✅ Configuración cargada y validada")
-        setup_database()
-        logger.info("✅ Base de datos configurada")
-        metrics_collector.load_from_db()
-        logger.info("✅ Métricas cargadas")
-        
-        bot_instance = KindleEmailBot(settings)
-        await bot_instance.initialize_handlers()
-        
-        webhook_url = f"{settings.WEBHOOK_URL}/telegram-webhook"
         await bot_instance.application.bot.set_webhook(
             url=webhook_url,
             secret_token=settings.WEBHOOK_SECRET_TOKEN,
@@ -638,18 +616,20 @@ async def lifespan(app: FastAPI):
         )
         logger.info(f"✅ Webhook configurado en la URL: {webhook_url}")
 
+        # Poner instancias en el estado de la app para que los endpoints las usen
         app.state.bot = bot_instance
         app.state.config = settings
         app.state.metrics = metrics_collector
         app.state.cache = cache_manager
 
-        logger.info("✅ Servidor iniciado correctamente")
+        logger.info("✅ Servidor listo para recibir peticiones.")
         yield
 
     except Exception as e:
-        logger.error(f"Error durante el inicio y configuración del webhook: {e}", exc_info=True)
+        logger.critical(f"CRITICAL: Error durante el inicio y configuración del webhook: {e}", exc_info=True)
         raise
     finally:
+        # --- Limpieza al apagar el servidor ---
         logger.info("🛑 Cerrando servidor y limpiando webhook...")
         if hasattr(app.state, 'bot'):
             try:
@@ -659,12 +639,21 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f"Error al eliminar el webhook o apagar el bot: {e}", exc_info=True)
 
+
 # --- APLICACIÓN FASTAPI ---
-app = FastAPI(title="Kindle Bot API", version="2.2.0", description="Bot de Telegram para envío de documentos a Kindle", lifespan=lifespan)
+app = FastAPI(
+    title="Kindle Bot API",
+    version="2.2.0",
+    description="Bot de Telegram para envío de documentos a Kindle",
+    lifespan=lifespan
+)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 templates = Jinja2Templates(directory="templates")
 
-@app.post("/telegram-webhook")
+
+# --- ENDPOINTS ---
+
+@app.post("/telegram")
 async def telegram_webhook(request: Request):
     """Este endpoint recibe las actualizaciones de Telegram."""
     secret_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
@@ -683,6 +672,7 @@ async def telegram_webhook(request: Request):
 
 @app.get("/", response_model=StatusResponse)
 async def read_root():
+    """Endpoint de estado principal."""
     try:
         bot_info = await app.state.bot.get_bot_info()
         summary = metrics_collector.get_summary()
@@ -693,20 +683,26 @@ async def read_root():
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
+    """Endpoint de health check."""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request):
+    """Dashboard web."""
     return templates.TemplateResponse("dashboard.html", {"request": request})
 
 @app.get("/api/metrics-data", response_class=JSONResponse)
 async def metrics_data():
+    """Endpoint de métricas JSON."""
     return metrics_collector.get_summary()
 
 @app.post("/api/clear-cache")
 async def clear_cache():
+    """Endpoint para limpiar caché (admin)."""
+    # Aquí iría la lógica para verificar si el usuario es admin
     cache_manager.clear()
     return {"message": "Caché limpiado exitosamente"}
+
 
 # --- PUNTO DE ENTRADA ---
 if __name__ == "__main__":
@@ -714,5 +710,5 @@ if __name__ == "__main__":
         logger.info(f"Iniciando servidor en {settings.HOST}:{settings.PORT}")
         uvicorn.run(app, host=settings.HOST, port=settings.PORT, log_level="info", access_log=True)
     except Exception as e:
-        logger.error(f"Error fatal al iniciar servidor: {e}", exc_info=True)
+        logger.critical(f"CRITICAL: Error fatal al iniciar servidor: {e}", exc_info=True)
         raise
