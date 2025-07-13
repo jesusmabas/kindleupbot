@@ -1,12 +1,10 @@
 # database.py - VERSIÓN MEJORADA Y CORREGIDA
-import os
 import logging
 import psycopg2
 from typing import List, Tuple, Any, Optional
 from contextlib import contextmanager
+from config import settings  # <-- IMPORTA LA CONFIGURACIÓN CENTRALIZADA
 
-# --- CONFIGURACIÓN ---
-DATABASE_URL = os.getenv("DATABASE_URL")
 logger = logging.getLogger(__name__)
 
 # --- GESTOR DE CONTEXTO PARA CONEXIONES ---
@@ -16,13 +14,16 @@ def get_db_connection():
     Proporciona una conexión a la base de datos como un gestor de contexto,
     asegurando que se cierre correctamente.
     """
-    if not DATABASE_URL:
+    # Pydantic Settings ya se asegura de que la variable exista al iniciar.
+    # Esta comprobación es una salvaguarda extra.
+    if not settings.DATABASE_URL:
         logger.error("La variable de entorno DATABASE_URL no está configurada.")
         raise ValueError("DATABASE_URL no está configurada.")
     
     conn = None
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        # Usa la URL de la configuración
+        conn = psycopg2.connect(settings.DATABASE_URL)
         yield conn
         conn.commit()
     except Exception as e:
