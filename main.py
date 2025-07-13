@@ -1100,7 +1100,7 @@ Documento enviado desde tu Bot de Telegram
             # Enviar email
             with smtplib.SMTP(self.config.SMTP_SERVER, self.config.SMTP_PORT) as server:
                 server.starttls()
-                server.login(self.config.GMAIL_USER, self.config.GMAIL_PASSWORD)
+                server.login(self.config.GMAIL_USER, self.config.GMAIL_APP_PASSWORD)
                 server.send_message(msg)
 
             logger.info(f"Documento {filename} enviado exitosamente a {kindle_email}")
