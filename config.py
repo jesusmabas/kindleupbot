@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     # --- Rate Limiting ---
     RATE_LIMIT_WINDOW: int = 60  # seconds
-    RATE_LIMIT_MAX_REQUESTS: int = 10
+    RATE_LIMIT_MAX_REQUESTS: int = 20
 
     # --- Cache ---
     CACHE_DURATION: int = 300  # 5 minutes in seconds
