@@ -1,5 +1,6 @@
 # config.py
 import os
+import secrets  # <-- Añadida esta importación
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -22,6 +23,13 @@ class Settings(BaseSettings):
 
     # --- Admin ---
     ADMIN_USER_ID: Optional[int] = None
+    
+    # --- Webhook Settings ---
+    # La URL pública de tu servicio en Render. Ej: https://kindleupbot.onrender.com
+    WEBHOOK_URL: str
+    # Un token secreto para asegurar que las peticiones vienen de Telegram.
+    # Se autogenera si no se provee como variable de entorno.
+    WEBHOOK_SECRET_TOKEN: str = secrets.token_hex(32)
 
     # --- Application Behavior ---
     MAX_FILE_SIZE: int = 48 * 1024 * 1024  # 48MB default
