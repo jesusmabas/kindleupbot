@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # --- Gmail SMTP Credentials ---
     # Corresponds to GMAIL_USER and GMAIL_APP_PASSWORD env vars
     GMAIL_USER: str
-    GMAIL_PASSWORD: str
+    GMAIL_APP_PASSWORD: str
 
     # --- Database ---
     DATABASE_URL: str
