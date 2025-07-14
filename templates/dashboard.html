@@ -104,9 +104,9 @@
                 .catch(error => console.error('Error fetching metrics:', error));
         }
 
-        // Cargar métricas al abrir la página y luego cada 5 segundos
+        // Cargar métricas al abrir la página y luego cada 60 segundos
         updateMetrics();
-        setInterval(updateMetrics, 5000);
+        setInterval(updateMetrics, 60000);
     </script>
 </body>
 </html>
