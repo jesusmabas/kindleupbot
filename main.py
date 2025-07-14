@@ -1,4 +1,4 @@
-# main.py - Versión mejorada y corregida para Webhooks
+# main.py - Versión final con reinicio de stats robusto y arquitectura de Webhooks
 import os
 import logging
 import smtplib
@@ -26,15 +26,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 import aiofiles
 
-# --- NUEVA IMPORTACIÓN DE CONFIGURACIÓN ---
 from config import settings, Settings
-
 from database import (
     setup_database, set_user_email, get_user_email,
-    get_metrics_from_db, save_metric, get_total_users
+    get_metrics_from_db, save_metric, get_total_users,
+    reset_metrics_table, log_admin_action
 )
-
-# --- IMPORTACIONES COMPLETAS Y CORRECTAS ---
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, ForceReply, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
@@ -71,9 +68,7 @@ SUPPORTED_FORMATS = {
 }
 PROMPT_SET_EMAIL = "📧 Por favor, introduce tu email de Kindle (ejemplo: usuario@kindle.com):"
 
-
-# --- Clases de utilidad (Cache, RateLimiter, Metrics, Validators) ---
-# (Estas clases no necesitan cambios y se omiten aquí por brevedad, pero deben estar en tu archivo)
+# --- Clases de utilidad (Cache, RateLimiter, etc.) ---
 class CacheManager:
     def __init__(self, default_ttl: int = 300):
         self.cache = {}
@@ -130,6 +125,15 @@ class MetricsCollector:
         self.response_times = []
         self.daily_stats = defaultdict(lambda: defaultdict(int))
         self.lock = asyncio.Lock()
+
+    def reset(self):
+        """Reinicia todas las métricas en memoria a sus valores iniciales."""
+        logger.warning("Reiniciando el colector de métricas en memoria.")
+        self.metrics.clear()
+        self.user_metrics.clear()
+        self.error_log.clear()
+        self.response_times.clear()
+        self.daily_stats.clear()
 
     def load_from_db(self):
         try:
@@ -280,31 +284,38 @@ def track_metrics(operation_name: str):
         return wrapper
     return decorator
 
-
-# --- CLASE PRINCIPAL DEL BOT (ADAPTADA PARA WEBHOOKS) ---
+# --- CLASE PRINCIPAL DEL BOT ---
 class KindleEmailBot:
     def __init__(self, config: Settings):
         self.config = config
         self.application = Application.builder().token(self.config.TELEGRAM_BOT_TOKEN).build()
         self.email_validator = EmailValidator()
         self.file_validator = FileValidator()
+        self._reset_lock = asyncio.Lock()
+
         self.main_keyboard = ReplyKeyboardMarkup([
             ["📧 Configurar Email", "🔍 Ver Mi Email"],
             ["📊 Mis Estadísticas", "❓ Ayuda"],
             ["🎯 Formatos Soportados", "🚀 Consejos"]
         ], resize_keyboard=True)
+        
         self.admin_keyboard = ReplyKeyboardMarkup([
             ["👑 Panel Admin", "📈 Métricas"],
-            ["🧹 Limpiar Cache", "🔄 Reiniciar"],
+            ["🧹 Limpiar Cache", "🔄 Reiniciar Stats"],
             ["👥 Usuarios", "🏠 Menú Principal"]
         ], resize_keyboard=True)
+
         self.confirm_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Confirmar", callback_data="confirm")],
             [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
         ])
 
+        self.confirm_reset_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Sí, borrar estadísticas", callback_data="confirm_reset_stats")],
+            [InlineKeyboardButton("❌ No, cancelar", callback_data="cancel_action")]
+        ])
+
     async def initialize_handlers(self):
-        """Inicializa solo los handlers, sin iniciar polling."""
         handlers = [
             CommandHandler("start", self.start), CommandHandler("help", self.help_command),
             CommandHandler("set_email", self.set_email_command), CommandHandler("my_email", self.my_email_command),
@@ -316,28 +327,128 @@ class KindleEmailBot:
             MessageHandler(filters.Document.ALL, self.handle_document),
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text),
         ]
-        for handler in handlers:
-            self.application.add_handler(handler)
+        for handler in handlers: self.application.add_handler(handler)
         await self.application.initialize()
         logger.info("🤖 Handlers del bot inicializados correctamente")
 
     async def shutdown(self):
-        """Cierre limpio del bot."""
         logger.info("Iniciando secuencia de apagado del bot...")
         if self.application:
             await self.application.shutdown()
         logger.info("🤖 Bot cerrado correctamente")
 
     async def get_bot_info(self):
-        """Obtiene información del bot."""
         try:
             return await self.application.bot.get_me() if self.application else None
         except TelegramError as e:
             logger.error(f"Error obteniendo info del bot: {e}")
             return None
+    
+    async def _perform_stats_reset(self, query: 'CallbackQuery') -> bool:
+        async with self._reset_lock:
+            try:
+                await query.edit_message_text("⏳ Borrando historial de la base de datos...")
+                loop = asyncio.get_event_loop()
+                
+                db_success = await loop.run_in_executor(None, reset_metrics_table)
+                
+                if not db_success:
+                    await query.edit_message_text("❌ <b>Error Crítico:</b> No se pudo reiniciar la base de datos. La operación ha sido cancelada.", parse_mode=ParseMode.HTML)
+                    return False
 
-    # --- La lógica de los Handlers (start, help, etc.) va aquí y no cambia ---
-    # (Los pego todos para que el archivo esté completo)
+                await query.edit_message_text("⏳ Reseteando contadores en memoria...")
+                metrics_collector.reset()
+                
+                admin_id = query.from_user.id
+                log_success = await loop.run_in_executor(
+                    None, log_admin_action, admin_id, "RESET_STATS", f"Admin {admin_id} reinició todas las métricas."
+                )
+                if not log_success:
+                    logger.error(f"Fallo al registrar la acción de reinicio de stats para el admin {admin_id}")
+
+                await query.edit_message_text("✅ ¡Todas las estadísticas han sido reiniciadas exitosamente!")
+                logger.warning(f"Estadísticas reiniciadas por el admin {admin_id}.")
+                return True
+            except Exception as e:
+                logger.error(f"Excepción no controlada durante el reinicio de stats: {e}", exc_info=True)
+                await query.edit_message_text("❌ Ocurrió un error inesperado durante el proceso de reinicio.")
+                return False
+
+    @track_metrics('command_reset_stats')
+    async def reset_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if not self.config.ADMIN_USER_ID or user_id != self.config.ADMIN_USER_ID:
+            await update.message.reply_text("🚫 Acceso denegado.")
+            return
+
+        await update.message.reply_html(
+            "<b>⚠️ ¿Estás seguro de que quieres reiniciar TODAS las estadísticas?</b>\n\n"
+            "Esta acción borrará permanentemente el historial de la base de datos y los contadores actuales.\n\n"
+            "<i>Esta acción no se puede deshacer.</i>",
+            reply_markup=self.confirm_reset_keyboard
+        )
+
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        user_id = update.effective_user.id
+
+        if query.data == "confirm":
+            pending_email = context.user_data.get('pending_email')
+            if pending_email and await self._save_user_email(user_id, pending_email):
+                await metrics_collector.increment('email_set_success', user_id)
+                await query.edit_message_text(f"✅ <b>Email configurado</b>\n\n📧 <code>{pending_email}</code>", parse_mode=ParseMode.HTML)
+            else:
+                await query.edit_message_text("❌ Error al guardar el email")
+            context.user_data.pop('pending_email', None)
+
+        elif query.data == "cancel":
+            await query.edit_message_text("❌ Configuración cancelada")
+            context.user_data.pop('pending_email', None)
+            
+        elif query.data == "confirm_reset_stats":
+            if not self.config.ADMIN_USER_ID or user_id != self.config.ADMIN_USER_ID:
+                await query.edit_message_text("🚫 Acción no autorizada.")
+                return
+            await self._perform_stats_reset(query)
+
+        elif query.data == "cancel_action":
+            await query.edit_message_text("👍 Acción cancelada.")
+    
+    @track_metrics('handle_text')
+    async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = update.message.text
+        is_admin = self.config.ADMIN_USER_ID and update.effective_user.id == self.config.ADMIN_USER_ID
+        
+        command_map = {
+            "📧 Configurar Email": self.set_email_command, "🔍 Ver Mi Email": self.my_email_command,
+            "📊 Mis Estadísticas": self.stats_command, "❓ Ayuda": self.help_command,
+            "🎯 Formatos Soportados": self.formats_command, "🚀 Consejos": self.tips_command
+        }
+        admin_command_map = {
+            "👑 Panel Admin": self.admin_command, "📈 Métricas": self.admin_command,
+            "🧹 Limpiar Cache": self.clear_cache_command,
+            "🔄 Reiniciar Stats": self.reset_stats_command,
+            "👥 Usuarios": lambda u, c: u.message.reply_text(f"👥 Hay un total de {get_total_users()} usuarios registrados."),
+            "🏠 Menú Principal": lambda u, c: u.message.reply_text("Volviendo al menú principal...", reply_markup=self.main_keyboard)
+        }
+        
+        if text in command_map:
+            await command_map[text](update, context)
+        elif is_admin and text in admin_command_map:
+            await admin_command_map[text](update, context)
+        else:
+            text_lower = text.lower()
+            if any(word in text_lower for word in ['hola', 'hello', 'hi', 'buenas']):
+                await update.message.reply_text("¡Hola! 👋 Soy tu asistente de Kindle.\nEnvíame un documento para empezar.", reply_markup=self.main_keyboard)
+            elif any(word in text_lower for word in ['ayuda', 'help', 'auxilio']):
+                await self.help_command(update, context)
+            elif any(word in text_lower for word in ['gracias', 'thanks', 'thank you']):
+                await update.message.reply_text("¡De nada! 😊 Estoy aquí para ayudarte.")
+            else:
+                await update.message.reply_html("🤔 <b>No entiendo ese mensaje</b>\n\n💡 <b>Puedo ayudarte con:</b>\n• Configurar tu email de Kindle\n• Enviar documentos a tu dispositivo\n• Mostrar estadísticas de uso\n\n📄 <b>Envía un documento</b> o usa los botones del menú", reply_markup=self.main_keyboard)
+
+    # --- El resto de los handlers (start, help, handle_document, etc.) ---
     @track_metrics('command_start')
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
@@ -391,22 +502,6 @@ class KindleEmailBot:
             await update.message.reply_html(f"✅ <b>Email configurado correctamente</b>\n\n📧 <b>Tu email:</b> <code>{kindle_email}</code>\n\n🔑 <b>Recuerda autorizar:</b> <code>{self.config.GMAIL_USER}</code>")
         else:
             await update.message.reply_html("❌ <b>Error al guardar el email</b>\n\n🔄 Por favor, inténtalo de nuevo")
-
-    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = update.callback_query
-        await query.answer()
-        user_id = update.effective_user.id
-        if query.data == "confirm":
-            pending_email = context.user_data.get('pending_email')
-            if pending_email and await self._save_user_email(user_id, pending_email):
-                await metrics_collector.increment('email_set_success', user_id)
-                await query.edit_message_text(f"✅ <b>Email configurado</b>\n\n📧 <code>{pending_email}</code>", parse_mode=ParseMode.HTML)
-            else:
-                await query.edit_message_text("❌ Error al guardar el email")
-            context.user_data.pop('pending_email', None)
-        elif query.data == "cancel":
-            await query.edit_message_text("❌ Configuración cancelada")
-            context.user_data.pop('pending_email', None)
 
     async def _save_user_email(self, user_id: int, email: str) -> bool:
         try:
@@ -546,32 +641,6 @@ class KindleEmailBot:
         except smtplib.SMTPRecipientsRefused: return False, "Email de destinatario rechazado"
         except Exception as e: return False, f"Error SMTP: {str(e)}"
 
-    @track_metrics('handle_text')
-    async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        text, user_id = update.message.text, update.effective_user.id
-        is_admin = self.config.ADMIN_USER_ID and user_id == self.config.ADMIN_USER_ID
-        command_map = {
-            "📧 Configurar Email": self.set_email_command, "🔍 Ver Mi Email": self.my_email_command,
-            "📊 Mis Estadísticas": self.stats_command, "❓ Ayuda": self.help_command,
-            "🎯 Formatos Soportados": self.formats_command, "🚀 Consejos": self.tips_command
-        }
-        admin_command_map = {
-            "👑 Panel Admin": self.admin_command, "📈 Métricas": self.admin_command,
-            "🧹 Limpiar Cache": self.clear_cache_command,
-            "🔄 Reiniciar": lambda u, c: u.message.reply_text("Esta función debe ser implementada por el administrador del servidor."),
-            "👥 Usuarios": lambda u, c: u.message.reply_text(f"👥 Hay un total de {get_total_users()} usuarios registrados."),
-            "🏠 Menú Principal": lambda u, c: u.message.reply_text("Volviendo al menú principal...", reply_markup=self.main_keyboard)
-        }
-        if text in command_map: await command_map[text](update, context)
-        elif is_admin and text in admin_command_map: await admin_command_map[text](update, context)
-        else:
-            text_lower = text.lower()
-            if any(word in text_lower for word in ['hola', 'hello', 'hi', 'buenas']):
-                await update.message.reply_text("¡Hola! 👋 Soy tu asistente de Kindle.\nEnvíame un documento para empezar.", reply_markup=self.main_keyboard)
-            elif any(word in text_lower for word in ['ayuda', 'help', 'auxilio']): await self.help_command(update, context)
-            elif any(word in text_lower for word in ['gracias', 'thanks', 'thank you']): await update.message.reply_text("¡De nada! 😊 Estoy aquí para ayudarte.")
-            else: await update.message.reply_html("🤔 <b>No entiendo ese mensaje</b>\n\n💡 <b>Puedo ayudarte con:</b>\n• Configurar tu email de Kindle\n• Enviar documentos a tu dispositivo\n• Mostrar estadísticas de uso\n\n📄 <b>Envía un documento</b> o usa los botones del menú", reply_markup=self.main_keyboard)
-
 # --- MODELOS PYDANTIC ---
 class StatusResponse(BaseModel):
     status: str
@@ -587,14 +656,12 @@ class EmailValidationRequest(BaseModel):
             raise ValueError('Formato de email inválido')
         return v.lower()
 
-
 # --- GESTOR DE CICLO DE VIDA (LIFESPAN) PARA WEBHOOK ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Gestor de ciclo de vida para configurar y limpiar el webhook."""
     logger.info("🚀 Iniciando servidor y configurando webhook...")
     
-    # --- Inicialización de toda la lógica del bot ---
     logger.info("✅ Configuración cargada y validada")
     setup_database()
     logger.info("✅ Base de datos configurada")
@@ -604,9 +671,7 @@ async def lifespan(app: FastAPI):
     bot_instance = KindleEmailBot(settings)
     await bot_instance.initialize_handlers()
     
-    # --- Configuración del Webhook ---
-    # El webhook se configura DESPUÉS de que el bot esté listo para recibir updates.
-    webhook_url = f"{settings.WEBHOOK_URL}/telegram" # URL más simple
+    webhook_url = f"{settings.WEBHOOK_URL}/telegram"
     try:
         await bot_instance.application.bot.set_webhook(
             url=webhook_url,
@@ -616,7 +681,6 @@ async def lifespan(app: FastAPI):
         )
         logger.info(f"✅ Webhook configurado en la URL: {webhook_url}")
 
-        # Poner instancias en el estado de la app para que los endpoints las usen
         app.state.bot = bot_instance
         app.state.config = settings
         app.state.metrics = metrics_collector
@@ -629,7 +693,6 @@ async def lifespan(app: FastAPI):
         logger.critical(f"CRITICAL: Error durante el inicio y configuración del webhook: {e}", exc_info=True)
         raise
     finally:
-        # --- Limpieza al apagar el servidor ---
         logger.info("🛑 Cerrando servidor y limpiando webhook...")
         if hasattr(app.state, 'bot'):
             try:
@@ -638,7 +701,6 @@ async def lifespan(app: FastAPI):
                 await app.state.bot.shutdown()
             except Exception as e:
                 logger.error(f"Error al eliminar el webhook o apagar el bot: {e}", exc_info=True)
-
 
 # --- APLICACIÓN FASTAPI ---
 app = FastAPI(
@@ -650,9 +712,7 @@ app = FastAPI(
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 templates = Jinja2Templates(directory="templates")
 
-
 # --- ENDPOINTS ---
-
 @app.post("/telegram")
 async def telegram_webhook(request: Request):
     """Este endpoint recibe las actualizaciones de Telegram."""
@@ -702,7 +762,6 @@ async def clear_cache():
     # Aquí iría la lógica para verificar si el usuario es admin
     cache_manager.clear()
     return {"message": "Caché limpiado exitosamente"}
-
 
 # --- PUNTO DE ENTRADA ---
 if __name__ == "__main__":
