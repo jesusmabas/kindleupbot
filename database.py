@@ -3,40 +3,33 @@ import logging
 import psycopg2
 from typing import List, Tuple, Any, Optional
 from contextlib import contextmanager
-from config import settings  # <-- IMPORTA LA CONFIGURACIÓN CENTRALIZADA
+from config import settings
 
 logger = logging.getLogger(__name__)
 
 # --- GESTOR DE CONTEXTO PARA CONEXIONES ---
 @contextmanager
 def get_db_connection():
-    """
-    Proporciona una conexión a la base de datos como un gestor de contexto,
-    asegurando que se cierre correctamente.
-    """
-    # Pydantic Settings ya se asegura de que la variable exista al iniciar.
-    # Esta comprobación es una salvaguarda extra.
+    """Proporciona una conexión a la base de datos como un gestor de contexto."""
     if not settings.DATABASE_URL:
         logger.error("La variable de entorno DATABASE_URL no está configurada.")
         raise ValueError("DATABASE_URL no está configurada.")
-    
     conn = None
     try:
-        # Usa la URL de la configuración
         conn = psycopg2.connect(settings.DATABASE_URL)
         yield conn
         conn.commit()
     except Exception as e:
         if conn:
-            conn.rollback() # Revierte los cambios si hubo un error
+            conn.rollback()
         logger.error("Error en la transacción de la base de datos: %s", e)
-        raise # Vuelve a lanzar la excepción para que el llamador la maneje
+        raise
     finally:
         if conn:
             conn.close()
 
 def setup_database():
-    """Crea las tablas 'users' y 'metrics' si no existen."""
+    """Crea todas las tablas necesarias si no existen."""
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -49,7 +42,7 @@ def setup_database():
                         last_activity_at TIMESTAMPTZ
                     )
                 """)
-                # Nueva tabla para métricas
+                # Tabla de métricas
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS metrics (
                         id SERIAL PRIMARY KEY,
@@ -59,16 +52,24 @@ def setup_database():
                         value INTEGER DEFAULT 1
                     )
                 """)
-        logger.info("Base de datos y tablas ('users', 'metrics') verificadas/creadas.")
+                # --- NUEVA TABLA DE AUDITORÍA ---
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS admin_logs (
+                        id SERIAL PRIMARY KEY,
+                        timestamp TIMESTAMPTZ DEFAULT NOW(),
+                        admin_user_id BIGINT NOT NULL,
+                        action TEXT NOT NULL,
+                        details TEXT
+                    )
+                """)
+        logger.info("Base de datos y tablas ('users', 'metrics', 'admin_logs') verificadas/creadas.")
     except Exception as e:
-        # El error ya se loguea en get_db_connection, aquí solo informamos del contexto.
         logger.error("Fallo al ejecutar setup_database: %s", e)
-        # Es un error crítico, así que lo relanzamos para detener la app si es necesario
         raise
 
-# --- FUNCIONES DE USUARIO ---
+# --- FUNCIONES DE USUARIO (sin cambios) ---
 def set_user_email(user_id: int, kindle_email: str) -> bool:
-    """Guarda o actualiza el email de Kindle y la actividad del usuario."""
+    # ... (código existente)
     sql = """
         INSERT INTO users (user_id, kindle_email, last_activity_at) VALUES (%s, %s, NOW())
         ON CONFLICT (user_id) DO UPDATE SET 
@@ -80,12 +81,11 @@ def set_user_email(user_id: int, kindle_email: str) -> bool:
             with conn.cursor() as cur:
                 cur.execute(sql, (user_id, kindle_email))
         return True
-    except Exception as e:
-        # El error ya se loguea, aquí solo indicamos que la operación falló.
+    except Exception:
         return False
 
 def get_user_email(user_id: int) -> Optional[str]:
-    """Obtiene el email de Kindle para un usuario y actualiza su actividad."""
+    # ... (código existente)
     sql_select = "SELECT kindle_email FROM users WHERE user_id = %s;"
     sql_update = "UPDATE users SET last_activity_at = NOW() WHERE user_id = %s;"
     try:
@@ -94,16 +94,14 @@ def get_user_email(user_id: int) -> Optional[str]:
                 cur.execute(sql_select, (user_id,))
                 result = cur.fetchone()
                 email = result[0] if result else None
-                
-                # Actualizar la última actividad solo si se encontró el email
                 if email:
                     cur.execute(sql_update, (user_id,))
         return email
-    except Exception as e:
+    except Exception:
         return None
 
 def get_total_users() -> int:
-    """Obtiene el número total de usuarios registrados."""
+    # ... (código existente)
     sql = "SELECT COUNT(*) FROM users;"
     try:
         with get_db_connection() as conn:
@@ -111,28 +109,53 @@ def get_total_users() -> int:
                 cur.execute(sql)
                 result = cur.fetchone()
         return result[0] if result else 0
-    except Exception as e:
+    except Exception:
         return 0
 
 # --- FUNCIONES DE MÉTRICAS ---
 def save_metric(metric_name: str, user_id: Optional[int], value: int):
-    """Guarda un evento de métrica en la base de datos."""
+    # ... (código existente)
     sql = "INSERT INTO metrics (metric_name, user_id, value) VALUES (%s, %s, %s);"
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, (metric_name, user_id, value))
-    except Exception as e:
-        # Evitamos que un fallo al guardar métricas detenga la app
+    except Exception:
         pass
 
 def get_metrics_from_db() -> List[Tuple[Any, ...]]:
-    """Obtiene todos los registros de métricas de la base de datos."""
+    # ... (código existente)
     sql = "SELECT metric_name, user_id, value FROM metrics;"
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql)
                 return cur.fetchall()
-    except Exception as e:
+    except Exception:
         return []
+
+def reset_metrics_table() -> bool:
+    """Vacía la tabla 'metrics'. Usa TRUNCATE para eficiencia."""
+    sql = "TRUNCATE TABLE metrics RESTART IDENTITY;"
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+        logger.warning("La tabla 'metrics' ha sido vaciada.")
+        return True
+    except Exception as e:
+        logger.error("Fallo al truncar la tabla 'metrics': %s", e)
+        return False
+
+# --- NUEVA FUNCIÓN DE AUDITORÍA ---
+def log_admin_action(admin_user_id: int, action: str, details: str = "") -> bool:
+    """Registra una acción administrativa en la base de datos."""
+    sql = "INSERT INTO admin_logs (admin_user_id, action, details) VALUES (%s, %s, %s);"
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (admin_user_id, action, details))
+        return True
+    except Exception as e:
+        logger.error("Fallo al registrar la acción del admin: %s", e)
+        return False
