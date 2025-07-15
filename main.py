@@ -18,6 +18,8 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import unicodedata
+from email.mime.application import MIMEApplication
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -665,26 +667,41 @@ class KindleEmailBot:
 
     def _send_to_kindle_sync(self, kindle_email: str, file_data: bytes, filename: str, subject: str) -> Tuple[bool, str]:
         try:
+            # Normalizar nombre para eliminar tildes y caracteres especiales
+            nfkd = unicodedata.normalize('NFKD', filename)
+            safe_fn = ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
+            
+            # Crear mensaje multipart
             msg = MIMEMultipart()
-            msg['From'], msg['To'], msg['Subject'] = self.config.GMAIL_USER, kindle_email, subject or f"Documento: {filename}"
-            msg.attach(MIMEText(f"Documento enviado desde tu Bot de Telegram\n\n📄 Archivo: {filename}\n📅 Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n🤖 Enviado por: Kindle Bot v2.2\n\n¡Disfruta tu lectura!", 'plain', 'utf-8'))
-            ctype, encoding = mimetypes.guess_type(filename)
-            ctype = 'application/octet-stream' if ctype is None or encoding is not None else ctype
-            maintype, subtype = ctype.split('/', 1)
-            attachment = MIMEBase(maintype, subtype)
-            attachment.set_payload(file_data)
-            encoders.encode_base64(attachment)
-            attachment.add_header('Content-Disposition', f'attachment; filename="{filename}"')
-            msg.attach(attachment)
+            msg['From'] = self.config.GMAIL_USER
+            msg['To'] = kindle_email
+            msg['Subject'] = subject or f"Doc: {safe_fn}"
+            msg.attach(MIMEText(f"Enviado desde tu Bot de Telegram. Archivo: {safe_fn}"))
+            
+            # Adjuntar usando MIMEApplication para que detecte bien el tipo
+            subtype = safe_fn.rsplit('.', 1)[-1]
+            part = MIMEApplication(file_data, _subtype=subtype)
+            part.add_header('Content-Disposition', 'attachment', filename=safe_fn)
+            part.add_header('Content-Type', part.get_content_type(), name=safe_fn)
+            
+            msg.attach(part)
+            
+            # Envío SMTP
             with smtplib.SMTP(self.config.SMTP_SERVER, self.config.SMTP_PORT) as server:
                 server.starttls()
                 server.login(self.config.GMAIL_USER, self.config.GMAIL_APP_PASSWORD)
                 server.send_message(msg)
-            logger.info(f"Documento {filename} enviado exitosamente a {kindle_email}")
-            return True, "Documento enviado exitosamente"
-        except smtplib.SMTPAuthenticationError: return False, "Error de autenticación SMTP"
-        except smtplib.SMTPRecipientsRefused: return False, "Email de destinatario rechazado"
-        except Exception as e: return False, f"Error SMTP: {str(e)}"
+            
+            logger.info(f"Documento {safe_fn} enviado a {kindle_email}")
+            return True, "Enviado"
+        
+        except smtplib.SMTPAuthenticationError:
+            return False, "Error de autenticación SMTP"
+        except smtplib.SMTPRecipientsRefused:
+            return False, "Email de destinatario rechazado"
+        except Exception as e:
+            logger.error(f"Error SMTP al enviar a Kindle: {e}", exc_info=True)
+            return False, f"Error SMTP: {str(e)}"
 
 # --- MODELOS PYDANTIC ---
 class StatusResponse(BaseModel):
