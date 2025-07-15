@@ -68,6 +68,14 @@ SUPPORTED_FORMATS = {
 }
 PROMPT_SET_EMAIL = "📧 Por favor, introduce tu email de Kindle (ejemplo: usuario@kindle.com):"
 
+
+# --- FUNCIÓN ASISTENTE ASÍNCRONA PARA LA BASE DE DATOS ---
+async def get_total_users_async() -> int:
+    """Obtiene el total de usuarios de forma no bloqueante."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, get_total_users)
+
+
 # --- Clases de utilidad (Cache, RateLimiter, etc.) ---
 class CacheManager:
     def __init__(self, default_ttl: int = 300):
@@ -178,13 +186,15 @@ class MetricsCollector:
         self.response_times.insert(0, {'duration': duration, 'operation': operation, 'timestamp': time.time()})
         if len(self.response_times) > 1000: self.response_times.pop()
 
-    def get_summary(self) -> Dict[str, Any]:
+    # CORREGIDO: Convertido a método asíncrono
+    async def get_summary(self) -> Dict[str, Any]:
         uptime = time.time() - self.start_time
         avg_response_time = sum(r['duration'] for r in self.response_times) / len(self.response_times) if self.response_times else 0
+        total_users_count = await get_total_users_async()
         return {
             'uptime_formatted': self._format_uptime(uptime),
             'uptime_seconds': uptime,
-            'total_users': get_total_users(),
+            'total_users': total_users_count,
             'total_documents_sent': self.metrics.get('document_sent', 0),
             'total_documents_received': self.metrics.get('document_received', 0),
             'total_errors': self.metrics.get('errors_total', 0),
@@ -322,6 +332,7 @@ class KindleEmailBot:
             CommandHandler("stats", self.stats_command), CommandHandler("admin", self.admin_command),
             CommandHandler("hide_keyboard", self.hide_keyboard_command), CommandHandler("formats", self.formats_command),
             CommandHandler("tips", self.tips_command), CommandHandler("clear_cache", self.clear_cache_command),
+            CommandHandler("reset_stats", self.reset_stats_command), # Añadido por si se usa comando directo
             CallbackQueryHandler(self.handle_callback),
             MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, self.handle_email_input),
             MessageHandler(filters.Document.ALL, self.handle_document),
@@ -344,7 +355,7 @@ class KindleEmailBot:
             logger.error(f"Error obteniendo info del bot: {e}")
             return None
     
-    async def _perform_stats_reset(self, query: 'CallbackQuery') -> bool:
+    async def _perform_stats_reset(self, query: 'Update.callback_query') -> bool:
         async with self._reset_lock:
             try:
                 await query.edit_message_text("⏳ Borrando historial de la base de datos...")
@@ -415,11 +426,16 @@ class KindleEmailBot:
         elif query.data == "cancel_action":
             await query.edit_message_text("👍 Acción cancelada.")
     
+    # CORREGIDO: Llamada a la DB no bloqueante
     @track_metrics('handle_text')
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         is_admin = self.config.ADMIN_USER_ID and update.effective_user.id == self.config.ADMIN_USER_ID
         
+        async def show_total_users(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+            total = await get_total_users_async()
+            await upd.message.reply_text(f"👥 Hay un total de {total} usuarios registrados.")
+
         command_map = {
             "📧 Configurar Email": self.set_email_command, "🔍 Ver Mi Email": self.my_email_command,
             "📊 Mis Estadísticas": self.stats_command, "❓ Ayuda": self.help_command,
@@ -429,7 +445,7 @@ class KindleEmailBot:
             "👑 Panel Admin": self.admin_command, "📈 Métricas": self.admin_command,
             "🧹 Limpiar Cache": self.clear_cache_command,
             "🔄 Reiniciar Stats": self.reset_stats_command,
-            "👥 Usuarios": lambda u, c: u.message.reply_text(f"👥 Hay un total de {get_total_users()} usuarios registrados."),
+            "👥 Usuarios": show_total_users,
             "🏠 Menú Principal": lambda u, c: u.message.reply_text("Volviendo al menú principal...", reply_markup=self.main_keyboard)
         }
         
@@ -533,22 +549,29 @@ class KindleEmailBot:
             logger.error(f"Error obteniendo email para usuario {user_id}: {e}")
             return None
 
+    # CORREGIDO: Llamadas a la DB no bloqueantes
     @track_metrics('command_stats')
     async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id, stats = update.effective_user.id, metrics_collector.get_user_stats(update.effective_user.id)
+        user_id = update.effective_user.id
+        stats = metrics_collector.get_user_stats(user_id)
         success_rate = stats['success_rate']
         filled_bars = int((success_rate / 100) * 10)
         bar = "█" * filled_bars + "░" * (10 - filled_bars)
-        stats_message = f"📊 <b>Tus Estadísticas Personales</b>\n\n📄 <b>Documentos:</b>\n• Recibidos: {stats['documents_received']}\n• Enviados exitosamente: {stats['documents_sent']}\n• Tasa de éxito: {success_rate}% {bar}\n\n⚡ <b>Actividad:</b>\n• Comandos ejecutados: {stats['commands_used']}\n• Errores encontrados: {stats['errors_encountered']}\n• Formato preferido: {stats['top_format']}\n\n🏆 <b>Ranking:</b>\n• Eres uno de {get_total_users()} usuarios totales\n• Tiempo promedio de respuesta: {metrics_collector.get_summary()['avg_response_time_ms']}ms"
+        
+        total_users = await get_total_users_async()
+        summary = await metrics_collector.get_summary() # summary ya contiene el tiempo de respuesta
+
+        stats_message = f"📊 <b>Tus Estadísticas Personales</b>\n\n📄 <b>Documentos:</b>\n• Recibidos: {stats['documents_received']}\n• Enviados exitosamente: {stats['documents_sent']}\n• Tasa de éxito: {success_rate}% {bar}\n\n⚡ <b>Actividad:</b>\n• Comandos ejecutados: {stats['commands_used']}\n• Errores encontrados: {stats['errors_encountered']}\n• Formato preferido: {stats['top_format']}\n\n🏆 <b>Ranking:</b>\n• Eres uno de {total_users} usuarios totales\n• Tiempo promedio de respuesta: {summary['avg_response_time_ms']}ms"
         await update.message.reply_html(stats_message)
 
+    # CORREGIDO: Llamada a get_summary no bloqueante
     @track_metrics('command_admin')
     async def admin_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if not self.config.ADMIN_USER_ID or user_id != self.config.ADMIN_USER_ID:
             await update.message.reply_text("🚫 Acceso denegado")
             return
-        summary = metrics_collector.get_summary()
+        summary = await metrics_collector.get_summary()
         success_rate = summary['success_rate']
         filled_bars = int((success_rate / 100) * 10)
         bar = "█" * filled_bars + "░" * (10 - filled_bars)
@@ -569,6 +592,7 @@ class KindleEmailBot:
     async def hide_keyboard_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🙈 Teclado ocultado\n\n💡 Usa /start para mostrarlo de nuevo", reply_markup=ReplyKeyboardRemove())
 
+    # CORREGIDO: Manejo de memoria eficiente para archivos
     @track_metrics('handle_document')
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -576,31 +600,52 @@ class KindleEmailBot:
         if not user_kindle_email:
             await update.message.reply_html("⚠️ <b>Email no configurado</b>\n\n📧 Usa <b>Configurar Email</b> primero")
             return
+
         doc = update.message.document
         valid, error_msg = self.file_validator.validate_file(doc.file_name, doc.file_size, self.config.MAX_FILE_SIZE)
         if not valid:
             await update.message.reply_html(f"❌ <b>Error:</b> {error_msg}")
             return
+
         ext = Path(doc.file_name).suffix.lower()
         await metrics_collector.increment('document_received', user_id)
         await metrics_collector.increment(f'format_{ext.replace(".", "")}', user_id)
+
         processing_msg = await update.message.reply_html(f"⏳ <b>Procesando documento...</b>\n\n📄 <b>Archivo:</b> <code>{doc.file_name}</code>\n📊 <b>Tamaño:</b> {doc.file_size / 1024**2:.1f}MB\n🎯 <b>Destino:</b> <code>{user_kindle_email}</code>")
+
+        temp_dir = Path("/tmp/kindleupbot_downloads")
+        temp_dir.mkdir(exist_ok=True)
+        temp_file_path = temp_dir / f"{doc.file_unique_id}{ext}"
+        
         try:
             download_start = time.time()
             file_obj = await context.bot.get_file(doc.file_id)
-            file_data = await file_obj.download_as_bytearray()
+            
+            await file_obj.download_to_drive(temp_file_path)
+            
             download_time = time.time() - download_start
             subject = "Convert" if doc.file_name.lower().endswith('.pdf') and update.message.caption and 'convert' in update.message.caption.lower() else ""
+
             await processing_msg.edit_text(f"📤 <b>Enviando a Kindle...</b>\n\n📄 <b>Archivo:</b> <code>{doc.file_name}</code>\n⏱️ <b>Descarga:</b> {download_time:.1f}s\n🎯 <b>Destino:</b> <code>{user_kindle_email}</code>", parse_mode=ParseMode.HTML)
+            
+            async with aiofiles.open(temp_file_path, 'rb') as f:
+                file_data = await f.read()
+
             success, msg = await self._send_to_kindle_with_retries(user_kindle_email, file_data, doc.file_name, subject)
+            
             if success:
                 await metrics_collector.increment('document_sent', user_id)
                 await processing_msg.edit_text(f"✅ <b>¡Documento enviado exitosamente!</b>\n\n📄 <b>Archivo:</b> <code>{doc.file_name}</code>\n📧 <b>Enviado a:</b> <code>{user_kindle_email}</code>\n🚀 <b>En un momento lo tendrás en tu Kindle...</b>", parse_mode=ParseMode.HTML)
             else:
                 await processing_msg.edit_text(f"❌ <b>Error al enviar documento</b>\n\n📄 <b>Archivo:</b> <code>{doc.file_name}</code>\n⚠️ <b>Error:</b> <i>{msg}</i>\n\n💡 <b>Verifica que el email esté autorizado</b>", parse_mode=ParseMode.HTML)
+
         except Exception as e:
             logger.error(f"Error procesando documento para usuario {user_id}: {e}", exc_info=True)
             await processing_msg.edit_text(f"❌ <b>Error inesperado</b>\n\n📄 <b>Archivo:</b> <code>{doc.file_name}</code>\n🔧 <b>Error técnico registrado</b>", parse_mode=ParseMode.HTML)
+        
+        finally:
+            if temp_file_path.exists():
+                os.remove(temp_file_path)
 
     async def _send_to_kindle_with_retries(self, kindle_email: str, file_data: bytes, filename: str, subject: str) -> Tuple[bool, str]:
         for attempt in range(self.config.MAX_RETRIES):
@@ -730,12 +775,13 @@ async def telegram_webhook(request: Request):
         logger.error(f"Error procesando la actualización del webhook: {e}", exc_info=True)
         return {"status": "error_processing"}, 200
 
+# CORREGIDO: Llamada a get_summary no bloqueante
 @app.get("/", response_model=StatusResponse)
 async def read_root():
     """Endpoint de estado principal."""
     try:
         bot_info = await app.state.bot.get_bot_info()
-        summary = metrics_collector.get_summary()
+        summary = await metrics_collector.get_summary()
         return StatusResponse(status="✅ Bot activo y funcionando", bot_username=bot_info.username if bot_info else None, metrics=summary)
     except Exception as e:
         logger.error(f"Error en endpoint raíz: {e}")
@@ -751,10 +797,11 @@ async def dashboard(request: Request):
     """Dashboard web."""
     return templates.TemplateResponse("dashboard.html", {"request": request})
 
+# CORREGIDO: Llamada a get_summary no bloqueante
 @app.get("/api/metrics-data", response_class=JSONResponse)
 async def metrics_data():
     """Endpoint de métricas JSON."""
-    return metrics_collector.get_summary()
+    return await metrics_collector.get_summary()
 
 @app.post("/api/clear-cache")
 async def clear_cache():
@@ -763,7 +810,7 @@ async def clear_cache():
     cache_manager.clear()
     return {"message": "Caché limpiado exitosamente"}
 
-# --- PUNTO DE ENTRADA ---
+# --- PUNTO DE ENTRada ---
 if __name__ == "__main__":
     try:
         logger.info(f"Iniciando servidor en {settings.HOST}:{settings.PORT}")
