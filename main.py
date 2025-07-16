@@ -1,4 +1,5 @@
-# main.py - Versión final con reinicio de stats robusto y arquitectura de Webhooks
+# main.py - Versión final con conversión interactiva de PDF y optimizaciones
+
 import os
 import logging
 import smtplib
@@ -188,7 +189,6 @@ class MetricsCollector:
         self.response_times.insert(0, {'duration': duration, 'operation': operation, 'timestamp': time.time()})
         if len(self.response_times) > 1000: self.response_times.pop()
 
-    # CORREGIDO: Convertido a método asíncrono
     async def get_summary(self) -> Dict[str, Any]:
         uptime = time.time() - self.start_time
         avg_response_time = sum(r['duration'] for r in self.response_times) / len(self.response_times) if self.response_times else 0
@@ -334,7 +334,7 @@ class KindleEmailBot:
             CommandHandler("stats", self.stats_command), CommandHandler("admin", self.admin_command),
             CommandHandler("hide_keyboard", self.hide_keyboard_command), CommandHandler("formats", self.formats_command),
             CommandHandler("tips", self.tips_command), CommandHandler("clear_cache", self.clear_cache_command),
-            CommandHandler("reset_stats", self.reset_stats_command), # Añadido por si se usa comando directo
+            CommandHandler("reset_stats", self.reset_stats_command),
             CallbackQueryHandler(self.handle_callback),
             MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, self.handle_email_input),
             MessageHandler(filters.Document.ALL, self.handle_document),
@@ -401,87 +401,89 @@ class KindleEmailBot:
             reply_markup=self.confirm_reset_keyboard
         )
 
+    # --- MÉTODO MODIFICADO CON LA LÓGICA DE CONVERSIÓN DE PDF ---
     @track_metrics('handle_callback')
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         user_id = update.effective_user.id
 
-        # --- Flujo de conversión de PDF ---
+        # Decisión de conversión de PDF
         if query.data in ("pdf_convert_yes", "pdf_convert_no"):
-        data = context.user_data.get('pending_pdf')
-        if not data or data.get('user_id') != user_id:
-            await query.edit_message_text(
-                "⚠️ Este menú ha expirado o no te pertenece.",
-                reply_markup=None
-            )
-            return
-
-        filename = data['filename']
-        temp_path = Path(data['temp_path'])
-
-        # Feedback inmediato
-        await query.edit_message_text(
-            f"⏳ Preparando y enviando <code>{filename}</code>...",
-            parse_mode=ParseMode.HTML
-        )
-
-        try:
-            if not temp_path.exists():
+            data = context.user_data.get('pending_pdf')
+            if not data or data.get('user_id') != user_id:
                 await query.edit_message_text(
-                    f"❌ <b>Error:</b> El archivo temporal ya no existe.",
-                    parse_mode=ParseMode.HTML
+                    "⚠️ Este menú ha expirado o no te pertenece.",
+                    reply_markup=None
                 )
                 return
 
-            # Leer bytes en executor
-            loop = asyncio.get_event_loop()
-            file_data = await loop.run_in_executor(None, temp_path.read_bytes)
+            filename = data['filename']
+            temp_path = Path(data['temp_path'])
 
-            subject = "Convert" if query.data == "pdf_convert_yes" else ""
-            user_kindle_email = await self._get_user_email_async(user_id)
-            if not user_kindle_email:
-                await query.edit_message_text(
-                    "⚠️ Tu email de Kindle ya no está configurado.",
-                    parse_mode=ParseMode.HTML
-                )
-                return
-
-            # Envío real
-            success, msg = await self._send_to_kindle_with_retries(
-                user_kindle_email, file_data, filename, subject
-            )
-            if success:
-                action = "(convertido)" if subject else "(sin conversión)"
-                await query.edit_message_text(
-                    f"✅ ¡<b>{filename}</b> enviado exitosamente {action}!",
-                    parse_mode=ParseMode.HTML
-                )
-                await metrics_collector.increment('document_sent', user_id)
-                if subject:
-                    await metrics_collector.increment('pdf_converted', user_id)
-            else:
-                await query.edit_message_text(
-                    f"❌ <b>Error al enviar:</b> <i>{msg}</i>",
-                    parse_mode=ParseMode.HTML
-                )
-
-        except Exception as e:
-            logger.error(f"Error en callback de PDF para {user_id}: {e}", exc_info=True)
+            # Feedback inmediato
             await query.edit_message_text(
-                "❌ <b>Error inesperado</b> durante el envío.",
+                f"⏳ Preparando y enviando <code>{filename}</code>...",
                 parse_mode=ParseMode.HTML
             )
 
-        finally:
-            # Limpieza no bloqueante y eliminación de estado
-            context.user_data.pop('pending_pdf', None)
-            if temp_path.exists():
+            try:
+                if not temp_path.exists():
+                    await query.edit_message_text(
+                        f"❌ <b>Error:</b> El archivo temporal ya no existe.",
+                        parse_mode=ParseMode.HTML
+                    )
+                    return
+
+                # Leer bytes en executor para no bloquear
                 loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, temp_path.unlink)
+                file_data = await loop.run_in_executor(None, temp_path.read_bytes)
 
-        return
+                subject = "Convert" if query.data == "pdf_convert_yes" else ""
+                user_kindle_email = await self._get_user_email_async(user_id)
+                if not user_kindle_email:
+                    await query.edit_message_text(
+                        "⚠️ Tu email de Kindle ya no está configurado.",
+                        parse_mode=ParseMode.HTML
+                    )
+                    return
 
+                # Envío
+                success, msg = await self._send_to_kindle_with_retries(
+                    user_kindle_email, file_data, filename, subject
+                )
+                if success:
+                    action = "(convertido)" if subject else "(sin conversión)"
+                    await query.edit_message_text(
+                        f"✅ ¡<b>{filename}</b> enviado exitosamente {action}!",
+                        parse_mode=ParseMode.HTML
+                    )
+                    await metrics_collector.increment('document_sent', user_id)
+                    if subject:
+                        await metrics_collector.increment('pdf_converted', user_id)
+                else:
+                    await query.edit_message_text(
+                        f"❌ <b>Error al enviar:</b> <i>{msg}</i>",
+                        parse_mode=ParseMode.HTML
+                    )
+
+            except Exception as e:
+                logger.error(f"Error en callback de PDF para {user_id}: {e}", exc_info=True)
+                await query.edit_message_text(
+                    "❌ <b>Error inesperado</b> durante el envío.",
+                    parse_mode=ParseMode.HTML
+                )
+
+            finally:
+                # Borrado no bloqueante y limpieza de estado
+                context.user_data.pop('pending_pdf', None)
+                if temp_path.exists():
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, temp_path.unlink)
+
+            return
+
+        # Resto del handle_callback original
         if query.data == "confirm":
             pending_email = context.user_data.get('pending_email')
             if pending_email and await self._save_user_email(user_id, pending_email):
@@ -504,7 +506,6 @@ class KindleEmailBot:
         elif query.data == "cancel_action":
             await query.edit_message_text("👍 Acción cancelada.")
     
-    # CORREGIDO: Llamada a la DB no bloqueante
     @track_metrics('handle_text')
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
@@ -542,7 +543,6 @@ class KindleEmailBot:
             else:
                 await update.message.reply_html("🤔 <b>No entiendo ese mensaje</b>\n\n💡 <b>Puedo ayudarte con:</b>\n• Configurar tu email de Kindle\n• Enviar documentos a tu dispositivo\n• Mostrar estadísticas de uso\n\n📄 <b>Envía un documento</b> o usa los botones del menú", reply_markup=self.main_keyboard)
 
-    # --- El resto de los handlers (start, help, handle_document, etc.) ---
     @track_metrics('command_start')
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
@@ -627,7 +627,6 @@ class KindleEmailBot:
             logger.error(f"Error obteniendo email para usuario {user_id}: {e}")
             return None
 
-    # CORREGIDO: Llamadas a la DB no bloqueantes
     @track_metrics('command_stats')
     async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -637,12 +636,11 @@ class KindleEmailBot:
         bar = "█" * filled_bars + "░" * (10 - filled_bars)
         
         total_users = await get_total_users_async()
-        summary = await metrics_collector.get_summary() # summary ya contiene el tiempo de respuesta
+        summary = await metrics_collector.get_summary()
 
         stats_message = f"📊 <b>Tus Estadísticas Personales</b>\n\n📄 <b>Documentos:</b>\n• Recibidos: {stats['documents_received']}\n• Enviados exitosamente: {stats['documents_sent']}\n• Tasa de éxito: {success_rate}% {bar}\n\n⚡ <b>Actividad:</b>\n• Comandos ejecutados: {stats['commands_used']}\n• Errores encontrados: {stats['errors_encountered']}\n• Formato preferido: {stats['top_format']}\n\n🏆 <b>Ranking:</b>\n• Eres uno de {total_users} usuarios totales\n• Tiempo promedio de respuesta: {summary['avg_response_time_ms']}ms"
         await update.message.reply_html(stats_message)
 
-    # CORREGIDO: Llamada a get_summary no bloqueante
     @track_metrics('command_admin')
     async def admin_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -670,87 +668,93 @@ class KindleEmailBot:
     async def hide_keyboard_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🙈 Teclado ocultado\n\n💡 Usa /start para mostrarlo de nuevo", reply_markup=ReplyKeyboardRemove())
 
+    # --- MÉTODO MODIFICADO CON LA LÓGICA DE CONVERSIÓN DE PDF ---
     @track_metrics('handle_document')
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_kindle_email = await self._get_user_email_async(user_id)
-    if not user_kindle_email:
-        await update.message.reply_html(
-            "⚠️ <b>Email no configurado.</b>\n\nUsa /set_email o el botón del menú para empezar."
-        )
-        return
-
-    doc = update.message.document
-    valid, error_msg = self.file_validator.validate_file(
-        doc.file_name, doc.file_size, self.config.MAX_FILE_SIZE
-    )
-    if not valid:
-        await update.message.reply_html(f"❌ <b>Error:</b> {error_msg}")
-        return
-
-    ext = Path(doc.file_name).suffix.lower()
-    await metrics_collector.increment('document_received', user_id)
-    await metrics_collector.increment(f'format_{ext.replace(".", "")}', user_id)
-
-    # Descargar a ruta temporal
-    temp_dir = Path("/tmp/kindleupbot_downloads")
-    temp_dir.mkdir(exist_ok=True)
-    temp_file_path = temp_dir / f"{doc.file_unique_id}{ext}"
-
-    try:
-        file_obj = await context.bot.get_file(doc.file_id)
-        await file_obj.download_to_drive(temp_file_path)
-
-        # Flujo especial para PDF: preguntamos si convertir
-        if ext == '.pdf':
-            context.user_data['pending_pdf'] = {
-                'temp_path': str(temp_file_path),
-                'filename': doc.file_name,
-                'user_id': user_id
-            }
-            buttons = [
-                [InlineKeyboardButton("✅ Convertir (texto adaptable)", callback_data="pdf_convert_yes")],
-                [InlineKeyboardButton("❌ Sin convertir (diseño original)", callback_data="pdf_convert_no")]
-            ]
+        user_id = update.effective_user.id
+        user_kindle_email = await self._get_user_email_async(user_id)
+        if not user_kindle_email:
             await update.message.reply_html(
-                f"📄 <b>{doc.file_name}</b>\n\n"
-                "¿Quieres optimizar este PDF para Kindle?\n\n"
-                "• Convertir: texto adaptable (reflowable)\n"
-                "• Sin convertir: mantiene diseño original",
-                reply_markup=InlineKeyboardMarkup(buttons)
+                "⚠️ <b>Email no configurado.</b>\n\nUsa /set_email o el botón del menú para empezar."
             )
             return
 
-        # Para otros formatos: leemos y enviamos de inmediato
-        loop = asyncio.get_event_loop()
-        file_data = await loop.run_in_executor(None, Path(temp_file_path).read_bytes)
-
-        processing_msg = await update.message.reply_html(f"📤 Enviando <code>{doc.file_name}</code>...")
-        success, msg = await self._send_to_kindle_with_retries(
-            user_kindle_email, file_data, doc.file_name, ""
+        doc = update.message.document
+        valid, error_msg = self.file_validator.validate_file(
+            doc.file_name, doc.file_size, self.config.MAX_FILE_SIZE
         )
-        if success:
-            await metrics_collector.increment('document_sent', user_id)
-            await processing_msg.edit_text(
-                f"✅ ¡<b>{doc.file_name}</b> enviado!",
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            await processing_msg.edit_text(
-                f"❌ <b>Error al enviar:</b> <i>{msg}</i>",
-                parse_mode=ParseMode.HTML
-            )
+        if not valid:
+            await update.message.reply_html(f"❌ <b>Error:</b> {error_msg}")
+            return
 
-    except Exception as e:
-        logger.error(f"Error procesando documento para {user_id}: {e}", exc_info=True)
-        await update.message.reply_html("❌ <b>Error inesperado</b> al procesar el archivo.")
+        ext = Path(doc.file_name).suffix.lower()
+        await metrics_collector.increment('document_received', user_id)
+        await metrics_collector.increment(f'format_{ext.replace(".", "")}', user_id)
 
-    finally:
-        # Limpieza no bloqueante de archivos que no son PDF
-        if ext != '.pdf' and temp_file_path.exists():
+        # Descargar a ruta temporal
+        temp_dir = Path("/tmp/kindleupbot_downloads")
+        temp_dir.mkdir(exist_ok=True)
+        temp_file_path = temp_dir / f"{doc.file_unique_id}{ext}"
+
+        try:
+            file_obj = await context.bot.get_file(doc.file_id)
+            await file_obj.download_to_drive(temp_file_path)
+
+            # Si es PDF, preguntamos si convertir o no
+            if ext == '.pdf':
+                context.user_data['pending_pdf'] = {
+                    'temp_path': str(temp_file_path),
+                    'filename': doc.file_name,
+                    'user_id': user_id
+                }
+                buttons = [
+                    [InlineKeyboardButton(
+                        "✅ Convertir (texto adaptable)", callback_data="pdf_convert_yes"
+                    )],
+                    [InlineKeyboardButton(
+                        "❌ Sin convertir (diseño original)", callback_data="pdf_convert_no"
+                    )]
+                ]
+                await update.message.reply_html(
+                    f"📄 <b>{doc.file_name}</b>\n\n"
+                    "¿Quieres optimizar este PDF para Kindle?\n\n"
+                    "• Convertir: texto adaptable (reflowable)\n"
+                    "• Sin convertir: mantiene diseño original",
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+                return
+
+            # Para otros formatos, leemos y enviamos de inmediato
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, temp_file_path.unlink)
+            file_data = await loop.run_in_executor(None, Path(temp_file_path).read_bytes)
 
+            processing_msg = await update.message.reply_html(
+                f"📤 Enviando <code>{doc.file_name}</code>..."
+            )
+            success, msg = await self._send_to_kindle_with_retries(
+                user_kindle_email, file_data, doc.file_name, ""
+            )
+            if success:
+                await metrics_collector.increment('document_sent', user_id)
+                await processing_msg.edit_text(
+                    f"✅ ¡<b>{doc.file_name}</b> enviado!",
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                await processing_msg.edit_text(
+                    f"❌ <b>Error al enviar:</b> <i>{msg}</i>",
+                    parse_mode=ParseMode.HTML
+                )
+
+        except Exception as e:
+            logger.error(f"Error procesando documento para {user_id}: {e}", exc_info=True)
+            await update.message.reply_html("❌ <b>Error inesperado</b> al procesar el archivo.")
+
+        finally:
+            # Limpieza no bloqueante de no-PDFs
+            if ext != '.pdf' and temp_file_path.exists():
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, temp_file_path.unlink)
 
     async def _send_to_kindle_with_retries(self, kindle_email: str, file_data: bytes, filename: str, subject: str) -> Tuple[bool, str]:
         for attempt in range(self.config.MAX_RETRIES):
@@ -770,18 +774,15 @@ class KindleEmailBot:
 
     def _send_to_kindle_sync(self, kindle_email: str, file_data: bytes, filename: str, subject: str) -> Tuple[bool, str]:
         try:
-            # Normalizar nombre para eliminar tildes y caracteres especiales
             nfkd = unicodedata.normalize('NFKD', filename)
             safe_fn = ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
             
-            # Crear mensaje multipart
             msg = MIMEMultipart()
             msg['From'] = self.config.GMAIL_USER
             msg['To'] = kindle_email
             msg['Subject'] = subject or f"Doc: {safe_fn}"
             msg.attach(MIMEText(f"Enviado desde tu Bot de Telegram. Archivo: {safe_fn}"))
             
-            # Adjuntar usando MIMEApplication para que detecte bien el tipo
             subtype = safe_fn.rsplit('.', 1)[-1]
             part = MIMEApplication(file_data, _subtype=subtype)
             part.add_header('Content-Disposition', 'attachment', filename=safe_fn)
@@ -789,7 +790,6 @@ class KindleEmailBot:
             
             msg.attach(part)
             
-            # Envío SMTP
             with smtplib.SMTP(self.config.SMTP_SERVER, self.config.SMTP_PORT) as server:
                 server.starttls()
                 server.login(self.config.GMAIL_USER, self.config.GMAIL_APP_PASSWORD)
@@ -888,7 +888,6 @@ async def telegram_webhook(request: Request):
         logger.error(f"Error procesando la actualización del webhook: {e}", exc_info=True)
         return {"status": "error_processing"}, 200
 
-# CORREGIDO: Llamada a get_summary no bloqueante
 @app.get("/", response_model=StatusResponse)
 async def read_root():
     """Endpoint de estado principal."""
@@ -910,7 +909,6 @@ async def dashboard(request: Request):
     """Dashboard web."""
     return templates.TemplateResponse("dashboard.html", {"request": request})
 
-# CORREGIDO: Llamada a get_summary no bloqueante
 @app.get("/api/metrics-data", response_class=JSONResponse)
 async def metrics_data():
     """Endpoint de métricas JSON."""
