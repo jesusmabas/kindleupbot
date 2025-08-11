@@ -6,7 +6,7 @@ import smtplib
 import mimetypes
 import asyncio
 import uvicorn
-import pypandoc # <-- AÑADIDO
+import pypandoc
 from contextlib import asynccontextmanager
 from typing import Optional, Tuple, Dict, Any, List
 from datetime import datetime, timedelta
@@ -69,7 +69,7 @@ SUPPORTED_FORMATS = {
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.rtf': 'application/rtf',
     '.txt': 'text/plain', '.html': 'text/html', '.htm': 'text/html', '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.bmp': 'image/bmp',
-    '.md': 'text/markdown' # <-- AÑADIDO
+    '.md': 'text/markdown'
 }
 PROMPT_SET_EMAIL = "📧 Por favor, introduce tu email de Kindle (ejemplo: usuario@kindle.com):"
 
@@ -80,18 +80,26 @@ async def get_total_users_async() -> int:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, get_total_users)
 
-# --- NUEVA FUNCIÓN DE CONVERSIÓN MARKDOWN ---
-async def convert_markdown_to_epub(md_path: Path) -> Tuple[Optional[Path], Optional[str]]:
-    """Convierte un archivo Markdown a EPUB usando Pandoc."""
+# --- FUNCIÓN DE CONVERSIÓN MARKDOWN MEJORADA ---
+async def convert_markdown_to_epub(md_path: Path, title: str) -> Tuple[Optional[Path], Optional[str]]:
+    """Convierte un archivo Markdown a EPUB (versión 2) usando Pandoc, añadiendo un título."""
     epub_path = md_path.with_suffix('.epub')
+    # Extraer el nombre del fichero sin extensión para usarlo como título
+    base_title = Path(title).stem
+    metadata_args = [f'--metadata=title:{base_title}']
+    
     try:
         loop = asyncio.get_event_loop()
-        # Ejecuta pandoc en un hilo separado para no bloquear el bucle de eventos
         await loop.run_in_executor(
             None,
-            lambda: pypandoc.convert_file(str(md_path), 'epub', outputfile=str(epub_path), extra_args=['--standalone'])
+            lambda: pypandoc.convert_file(
+                str(md_path), 
+                'epub2',  # <-- CAMBIO a epub2 para máxima compatibilidad
+                outputfile=str(epub_path), 
+                extra_args=['--standalone'] + metadata_args
+            )
         )
-        logger.info(f"Archivo Markdown convertido exitosamente a EPUB en: {epub_path}")
+        logger.info(f"Archivo Markdown convertido exitosamente a EPUB v2 en: {epub_path}")
         return epub_path, None
     except Exception as e:
         logger.error(f"Error al convertir Markdown a EPUB con Pandoc: {e}", exc_info=True)
@@ -742,7 +750,7 @@ Si el teclado de botones te molesta, usa /hide_keyboard para ocultarlo. Siempre 
     async def hide_keyboard_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🙈 Teclado ocultado\n\n💡 Usa /start para mostrarlo de nuevo", reply_markup=ReplyKeyboardRemove())
 
-    # --- MANEJADOR DE DOCUMENTOS MODIFICADO ---
+    # --- MANEJADOR DE DOCUMENTOS MODIFICADO Y CORREGIDO ---
     @track_metrics('handle_document')
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -767,6 +775,7 @@ Si el teclado de botones te molesta, usa /hide_keyboard para ocultarlo. Siempre 
 
         temp_dir = Path("/tmp/kindleupbot_downloads")
         temp_dir.mkdir(exist_ok=True)
+        # Usamos el file_unique_id para evitar colisiones de nombres en el servidor
         temp_file_path = temp_dir / f"{doc.file_unique_id}{ext}"
         
         processing_msg = None
@@ -776,19 +785,22 @@ Si el teclado de botones te molesta, usa /hide_keyboard para ocultarlo. Siempre 
             await file_obj.download_to_drive(temp_file_path)
 
             file_to_send_path = temp_file_path
+            # Por defecto, el nombre del fichero a enviar es el original
             file_to_send_name = doc.file_name
             subject = ""
 
             if ext == '.md':
                 processing_msg = await update.message.reply_html(f"⚙️ Convirtiendo <code>{doc.file_name}</code> a formato EPUB...")
-                converted_path, convert_error = await convert_markdown_to_epub(temp_file_path)
+                # Pasamos el nombre del fichero original para usarlo como título en los metadatos
+                converted_path, convert_error = await convert_markdown_to_epub(temp_file_path, doc.file_name)
                 
                 if convert_error or not converted_path:
                     await processing_msg.edit_text(f"❌ <b>Error al convertir:</b>\n<i>{convert_error}</i>", parse_mode=ParseMode.HTML)
                     return
 
                 file_to_send_path = converted_path
-                file_to_send_name = converted_path.name
+                # CAMBIO: Usamos el nombre original con la nueva extensión .epub
+                file_to_send_name = Path(doc.file_name).with_suffix('.epub').name
                 subject = f"eBook: {file_to_send_name}"
             
             elif ext == '.pdf':
@@ -812,7 +824,7 @@ Si el teclado de botones te molesta, usa /hide_keyboard para ocultarlo. Siempre 
             
             if not processing_msg:
                 processing_msg = await update.message.reply_html(f"📤 Enviando <code>{file_to_send_name}</code>...")
-            else: # Actualizar mensaje si ya existe (para MD)
+            else:
                 await processing_msg.edit_text(f"📤 Enviando <code>{file_to_send_name}</code>...", parse_mode=ParseMode.HTML)
 
             success, msg = await self._send_to_kindle_with_retries(user_kindle_email, file_data, file_to_send_name, subject)
@@ -834,10 +846,8 @@ Si el teclado de botones te molesta, usa /hide_keyboard para ocultarlo. Siempre 
         
         finally:
             loop = asyncio.get_event_loop()
-            # Limpiar archivo original descargado
             if temp_file_path.exists():
                 await loop.run_in_executor(None, temp_file_path.unlink)
-            # Limpiar archivo convertido si existe
             if converted_path and converted_path.exists():
                 await loop.run_in_executor(None, converted_path.unlink)
 
