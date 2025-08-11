@@ -1,4 +1,4 @@
-# main.py - Versión final con conversión de Markdown y guía de ayuda modular
+# main.py - Versión final con conversión de MD a DOCX para máxima compatibilidad
 
 import os
 import logging
@@ -80,11 +80,10 @@ async def get_total_users_async() -> int:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, get_total_users)
 
-# --- FUNCIÓN DE CONVERSIÓN MARKDOWN MEJORADA ---
-async def convert_markdown_to_epub(md_path: Path, title: str) -> Tuple[Optional[Path], Optional[str]]:
-    """Convierte un archivo Markdown a EPUB (versión 2) usando Pandoc, añadiendo un título."""
-    epub_path = md_path.with_suffix('.epub')
-    # Extraer el nombre del fichero sin extensión para usarlo como título
+# --- FUNCIÓN DE CONVERSIÓN MARKDOWN A DOCX ---
+async def convert_markdown_to_docx(md_path: Path, title: str) -> Tuple[Optional[Path], Optional[str]]:
+    """Convierte un archivo Markdown a DOCX usando Pandoc."""
+    docx_path = md_path.with_suffix('.docx')
     base_title = Path(title).stem
     metadata_args = [f'--metadata=title:{base_title}']
     
@@ -94,15 +93,15 @@ async def convert_markdown_to_epub(md_path: Path, title: str) -> Tuple[Optional[
             None,
             lambda: pypandoc.convert_file(
                 str(md_path), 
-                'epub2',  # <-- CAMBIO a epub2 para máxima compatibilidad
-                outputfile=str(epub_path), 
+                'docx',  # Convertimos a docx
+                outputfile=str(docx_path), 
                 extra_args=['--standalone'] + metadata_args
             )
         )
-        logger.info(f"Archivo Markdown convertido exitosamente a EPUB v2 en: {epub_path}")
-        return epub_path, None
+        logger.info(f"Archivo Markdown convertido exitosamente a DOCX en: {docx_path}")
+        return docx_path, None
     except Exception as e:
-        logger.error(f"Error al convertir Markdown a EPUB con Pandoc: {e}", exc_info=True)
+        logger.error(f"Error al convertir Markdown a DOCX con Pandoc: {e}", exc_info=True)
         return None, f"Error de Pandoc: {str(e)}"
 
 # --- Clases de utilidad (Cache, RateLimiter, etc.) ---
@@ -622,31 +621,29 @@ class KindleEmailBot:
         tips_message = """
 🚀 <b>Consejos y Trucos Rápidos</b>
 
-Aquí tienes algunos trucos para sacarle el máximo partido al bot:
+🧠 <b>Markdown con Tablas</b>
+Si envías un fichero <code>.md</code> con tablas o imágenes complejas, lo convertiré a <code>.docx</code> para asegurar la máxima fidelidad en tu Kindle.
 
-🧠 <b>Elige bien con los PDF</b>
+📄 <b>Elige bien con los PDF</b>
 • ¿Libro o artículo de texto? → <b>✅ Convertir</b>.
 • ¿Manual con gráficos o cómic? → <b>❌ Sin convertir</b>.
 Piénsalo así: si quisieras cambiar el tamaño de la letra en el documento, elige "Convertir".
 
 ⚡️ <b>El Formato Ideal</b>
-Aunque el bot acepta muchos formatos, <code>.EPUB</code> es el rey. Si tienes un libro en varios formatos, elige siempre la versión <code>.EPUB</code> para la mejor experiencia de lectura en Kindle.
+Aunque el bot acepta muchos formatos, <code>.EPUB</code> es el rey para novelas y texto simple. Si tienes un libro en varios formatos, elige siempre la versión <code>.EPUB</code>.
 
 🔄 <b>Reenvío Fácil desde otros Chats</b>
 ¿Te han enviado un documento en otro chat o canal? No hace falta que lo descargues y lo vuelvas a subir. Simplemente <b>reenvíamelo directamente</b> a este chat y yo me encargaré.
 
 📂 <b>Gestiona Archivos Grandes</b>
 El límite es de 48 MB. Si un archivo es más grande, es probable que Amazon lo rechace de todas formas. Considera comprimirlo o dividirlo si es posible.
-
-🙈 <b>Menos es más</b>
-Si el teclado de botones te molesta, usa /hide_keyboard para ocultarlo. Siempre puedes recuperarlo con /start.
 """
         await update.message.reply_html(tips_message)
 
     @track_metrics('command_formats')
     async def formats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         formats_by_category = {
-            "📚 Libros Electrónicos": [".epub", ".mobi", ".azw", ".md (convierte a epub)"],
+            "📚 Libros Electrónicos": [".epub", ".mobi", ".azw", ".md (convierte a docx)"],
             "📄 Documentos": [".pdf", ".doc", ".docx", ".rtf", ".txt", ".html"],
             "🖼️ Imágenes": [".jpg", ".jpeg", ".png", ".gif", ".bmp"]
         }
@@ -750,7 +747,7 @@ Si el teclado de botones te molesta, usa /hide_keyboard para ocultarlo. Siempre 
     async def hide_keyboard_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🙈 Teclado ocultado\n\n💡 Usa /start para mostrarlo de nuevo", reply_markup=ReplyKeyboardRemove())
 
-    # --- MANEJADOR DE DOCUMENTOS MODIFICADO Y CORREGIDO ---
+    # --- MANEJADOR DE DOCUMENTOS CON LÓGICA DOCX ---
     @track_metrics('handle_document')
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -775,7 +772,6 @@ Si el teclado de botones te molesta, usa /hide_keyboard para ocultarlo. Siempre 
 
         temp_dir = Path("/tmp/kindleupbot_downloads")
         temp_dir.mkdir(exist_ok=True)
-        # Usamos el file_unique_id para evitar colisiones de nombres en el servidor
         temp_file_path = temp_dir / f"{doc.file_unique_id}{ext}"
         
         processing_msg = None
@@ -785,23 +781,21 @@ Si el teclado de botones te molesta, usa /hide_keyboard para ocultarlo. Siempre 
             await file_obj.download_to_drive(temp_file_path)
 
             file_to_send_path = temp_file_path
-            # Por defecto, el nombre del fichero a enviar es el original
             file_to_send_name = doc.file_name
             subject = ""
 
             if ext == '.md':
-                processing_msg = await update.message.reply_html(f"⚙️ Convirtiendo <code>{doc.file_name}</code> a formato EPUB...")
-                # Pasamos el nombre del fichero original para usarlo como título en los metadatos
-                converted_path, convert_error = await convert_markdown_to_epub(temp_file_path, doc.file_name)
+                processing_msg = await update.message.reply_html(f"⚙️ Convirtiendo <code>{doc.file_name}</code> a formato DOCX para máxima compatibilidad...")
+                
+                converted_path, convert_error = await convert_markdown_to_docx(temp_file_path, doc.file_name)
                 
                 if convert_error or not converted_path:
                     await processing_msg.edit_text(f"❌ <b>Error al convertir:</b>\n<i>{convert_error}</i>", parse_mode=ParseMode.HTML)
                     return
 
                 file_to_send_path = converted_path
-                # CAMBIO: Usamos el nombre original con la nueva extensión .epub
-                file_to_send_name = Path(doc.file_name).with_suffix('.epub').name
-                subject = f"eBook: {file_to_send_name}"
+                file_to_send_name = Path(doc.file_name).with_suffix('.docx').name
+                subject = f"Doc: {file_to_send_name}"
             
             elif ext == '.pdf':
                 context.user_data['pending_pdf'] = {
@@ -831,7 +825,7 @@ Si el teclado de botones te molesta, usa /hide_keyboard para ocultarlo. Siempre 
             if success:
                 await metrics_collector.increment('document_sent', user_id)
                 if ext == '.md':
-                    await metrics_collector.increment('md_converted', user_id)
+                    await metrics_collector.increment('md_converted_docx', user_id)
                 await processing_msg.edit_text(f"✅ ¡<b>{file_to_send_name}</b> enviado!", parse_mode=ParseMode.HTML)
             else:
                 await processing_msg.edit_text(f"❌ <b>Error al enviar:</b> <i>{msg}</i>", parse_mode=ParseMode.HTML)
