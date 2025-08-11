@@ -1,4 +1,4 @@
-# main.py - Versión final con guía de ayuda modular y consejos rápidos
+# main.py - Versión final con conversión de Markdown y guía de ayuda modular
 
 import os
 import logging
@@ -6,6 +6,7 @@ import smtplib
 import mimetypes
 import asyncio
 import uvicorn
+import pypandoc # <-- AÑADIDO
 from contextlib import asynccontextmanager
 from typing import Optional, Tuple, Dict, Any, List
 from datetime import datetime, timedelta
@@ -67,7 +68,8 @@ SUPPORTED_FORMATS = {
     '.azw': 'application/vnd.amazon.ebook', '.doc': 'application/msword',
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.rtf': 'application/rtf',
     '.txt': 'text/plain', '.html': 'text/html', '.htm': 'text/html', '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.bmp': 'image/bmp'
+    '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.bmp': 'image/bmp',
+    '.md': 'text/markdown' # <-- AÑADIDO
 }
 PROMPT_SET_EMAIL = "📧 Por favor, introduce tu email de Kindle (ejemplo: usuario@kindle.com):"
 
@@ -78,6 +80,22 @@ async def get_total_users_async() -> int:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, get_total_users)
 
+# --- NUEVA FUNCIÓN DE CONVERSIÓN MARKDOWN ---
+async def convert_markdown_to_epub(md_path: Path) -> Tuple[Optional[Path], Optional[str]]:
+    """Convierte un archivo Markdown a EPUB usando Pandoc."""
+    epub_path = md_path.with_suffix('.epub')
+    try:
+        loop = asyncio.get_event_loop()
+        # Ejecuta pandoc en un hilo separado para no bloquear el bucle de eventos
+        await loop.run_in_executor(
+            None,
+            lambda: pypandoc.convert_file(str(md_path), 'epub', outputfile=str(epub_path), extra_args=['--standalone'])
+        )
+        logger.info(f"Archivo Markdown convertido exitosamente a EPUB en: {epub_path}")
+        return epub_path, None
+    except Exception as e:
+        logger.error(f"Error al convertir Markdown a EPUB con Pandoc: {e}", exc_info=True)
+        return None, f"Error de Pandoc: {str(e)}"
 
 # --- Clases de utilidad (Cache, RateLimiter, etc.) ---
 class CacheManager:
@@ -620,7 +638,7 @@ Si el teclado de botones te molesta, usa /hide_keyboard para ocultarlo. Siempre 
     @track_metrics('command_formats')
     async def formats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         formats_by_category = {
-            "📚 Libros Electrónicos": [".epub", ".mobi", ".azw"],
+            "📚 Libros Electrónicos": [".epub", ".mobi", ".azw", ".md (convierte a epub)"],
             "📄 Documentos": [".pdf", ".doc", ".docx", ".rtf", ".txt", ".html"],
             "🖼️ Imágenes": [".jpg", ".jpeg", ".png", ".gif", ".bmp"]
         }
@@ -724,6 +742,7 @@ Si el teclado de botones te molesta, usa /hide_keyboard para ocultarlo. Siempre 
     async def hide_keyboard_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🙈 Teclado ocultado\n\n💡 Usa /start para mostrarlo de nuevo", reply_markup=ReplyKeyboardRemove())
 
+    # --- MANEJADOR DE DOCUMENTOS MODIFICADO ---
     @track_metrics('handle_document')
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -749,50 +768,79 @@ Si el teclado de botones te molesta, usa /hide_keyboard para ocultarlo. Siempre 
         temp_dir = Path("/tmp/kindleupbot_downloads")
         temp_dir.mkdir(exist_ok=True)
         temp_file_path = temp_dir / f"{doc.file_unique_id}{ext}"
-
+        
+        processing_msg = None
+        converted_path = None
         try:
             file_obj = await context.bot.get_file(doc.file_id)
             await file_obj.download_to_drive(temp_file_path)
 
-            if ext == '.pdf':
+            file_to_send_path = temp_file_path
+            file_to_send_name = doc.file_name
+            subject = ""
+
+            if ext == '.md':
+                processing_msg = await update.message.reply_html(f"⚙️ Convirtiendo <code>{doc.file_name}</code> a formato EPUB...")
+                converted_path, convert_error = await convert_markdown_to_epub(temp_file_path)
+                
+                if convert_error or not converted_path:
+                    await processing_msg.edit_text(f"❌ <b>Error al convertir:</b>\n<i>{convert_error}</i>", parse_mode=ParseMode.HTML)
+                    return
+
+                file_to_send_path = converted_path
+                file_to_send_name = converted_path.name
+                subject = f"eBook: {file_to_send_name}"
+            
+            elif ext == '.pdf':
                 context.user_data['pending_pdf'] = {
                     'temp_path': str(temp_file_path),
                     'filename': doc.file_name,
                     'user_id': user_id
                 }
                 buttons = [
-                    [InlineKeyboardButton(
-                        "✅ Convertir (texto adaptable)", callback_data="pdf_convert_yes"
-                    )],
-                    [InlineKeyboardButton(
-                        "❌ Sin convertir (diseño original)", callback_data="pdf_convert_no"
-                    )]
+                    [InlineKeyboardButton("✅ Convertir (texto adaptable)", callback_data="pdf_convert_yes")],
+                    [InlineKeyboardButton("❌ Sin convertir (diseño original)", callback_data="pdf_convert_no")]
                 ]
                 await update.message.reply_html(
-                    f"📄 <b>{doc.file_name}</b>\n\n"
-                    "¿Quieres optimizar este PDF para Kindle?\n\n"
-                    "• Convertir: texto adaptable (reflowable)\n"
-                    "• Sin convertir: mantiene diseño original",
+                    f"📄 <b>{doc.file_name}</b>\n\n¿Quieres optimizar este PDF para Kindle?",
                     reply_markup=InlineKeyboardMarkup(buttons)
                 )
                 return
 
             loop = asyncio.get_event_loop()
-            file_data = await loop.run_in_executor(None, Path(temp_file_path).read_bytes)
-            processing_msg = await update.message.reply_html(f"📤 Enviando <code>{doc.file_name}</code>...")
-            success, msg = await self._send_to_kindle_with_retries(user_kindle_email, file_data, doc.file_name, "")
+            file_data = await loop.run_in_executor(None, file_to_send_path.read_bytes)
+            
+            if not processing_msg:
+                processing_msg = await update.message.reply_html(f"📤 Enviando <code>{file_to_send_name}</code>...")
+            else: # Actualizar mensaje si ya existe (para MD)
+                await processing_msg.edit_text(f"📤 Enviando <code>{file_to_send_name}</code>...", parse_mode=ParseMode.HTML)
+
+            success, msg = await self._send_to_kindle_with_retries(user_kindle_email, file_data, file_to_send_name, subject)
             if success:
                 await metrics_collector.increment('document_sent', user_id)
-                await processing_msg.edit_text(f"✅ ¡<b>{doc.file_name}</b> enviado!", parse_mode=ParseMode.HTML)
+                if ext == '.md':
+                    await metrics_collector.increment('md_converted', user_id)
+                await processing_msg.edit_text(f"✅ ¡<b>{file_to_send_name}</b> enviado!", parse_mode=ParseMode.HTML)
             else:
                 await processing_msg.edit_text(f"❌ <b>Error al enviar:</b> <i>{msg}</i>", parse_mode=ParseMode.HTML)
+        
         except Exception as e:
             logger.error(f"Error procesando documento para {user_id}: {e}", exc_info=True)
-            await update.message.reply_html("❌ <b>Error inesperado</b> al procesar el archivo.")
+            error_message = "❌ <b>Error inesperado</b> al procesar el archivo."
+            if processing_msg:
+                await processing_msg.edit_text(error_message, parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_html(error_message)
+        
         finally:
-            if ext != '.pdf' and temp_file_path.exists():
-                loop = asyncio.get_event_loop()
+            loop = asyncio.get_event_loop()
+            # Limpiar archivo original descargado
+            if temp_file_path.exists():
                 await loop.run_in_executor(None, temp_file_path.unlink)
+            # Limpiar archivo convertido si existe
+            if converted_path and converted_path.exists():
+                await loop.run_in_executor(None, converted_path.unlink)
+
 
     async def _send_to_kindle_with_retries(self, kindle_email: str, file_data: bytes, filename: str, subject: str) -> Tuple[bool, str]:
         for attempt in range(self.config.MAX_RETRIES):
@@ -959,7 +1007,7 @@ async def clear_cache():
     cache_manager.clear()
     return {"message": "Caché limpiado exitosamente"}
 
-# --- PUNTO DE ENTRada ---
+# --- PUNTO DE ENTRADA ---
 if __name__ == "__main__":
     try:
         logger.info(f"Iniciando servidor en {settings.HOST}:{settings.PORT}")
