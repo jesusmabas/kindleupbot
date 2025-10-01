@@ -870,31 +870,31 @@ El límite es de 48 MB. Si un archivo es más grande, es probable que Amazon lo 
 
     def _send_to_kindle_sync(self, kindle_email: str, file_data: bytes, filename: str, subject: str) -> Tuple[bool, str]:
         try:
-        import resend
+            import resend
         
-        resend.api_key = self.config.RESEND_API_KEY
+            resend.api_key = self.config.RESEND_API_KEY
         
-        nfkd = unicodedata.normalize('NFKD', filename)
-        safe_fn = ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
+            nfkd = unicodedata.normalize('NFKD', filename)
+            safe_fn = ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
         
-        params = {
-            "from": self.config.RESEND_FROM_EMAIL,
-            "to": [kindle_email],
-            "subject": subject or f"Doc: {safe_fn}",
-            "text": f"Enviado desde tu Bot de Telegram. Archivo: {safe_fn}",
-            "attachments": [{
+            params = {
+                "from": self.config.RESEND_FROM_EMAIL,
+                "to": [kindle_email],
+                "subject": subject or f"Doc: {safe_fn}",
+                "text": f"Enviado desde tu Bot de Telegram. Archivo: {safe_fn}",
+                "attachments": [{
                 "filename": safe_fn,
                 "content": file_data
-            }]
-        }
+                }]
+            }
         
-        resend.Emails.send(params)
-        logger.info(f"Documento {safe_fn} enviado a {kindle_email} via Resend")
-        return True, "Enviado"
+            resend.Emails.send(params)
+            logger.info(f"Documento {safe_fn} enviado a {kindle_email} via Resend")
+            return True, "Enviado"
         
         except Exception as e:
-        logger.error(f"Error Resend al enviar a Kindle: {e}", exc_info=True)
-        return False, f"Error Resend: {str(e)}"
+            logger.error(f"Error Resend al enviar a Kindle: {e}", exc_info=True)
+            return False, f"Error Resend: {str(e)}"
 
 # --- MODELOS PYDANTIC ---
 class StatusResponse(BaseModel):
