@@ -871,11 +871,15 @@ El límite es de 48 MB. Si un archivo es más grande, es probable que Amazon lo 
     def _send_to_kindle_sync(self, kindle_email: str, file_data: bytes, filename: str, subject: str) -> Tuple[bool, str]:
         try:
             import resend
+            import base64
         
             resend.api_key = self.config.RESEND_API_KEY
         
             nfkd = unicodedata.normalize('NFKD', filename)
             safe_fn = ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
+
+            # Convertir bytes a base64
+            file_base64 = base64.b64encode(file_data).decode('utf-8')
         
             params = {
                 "from": self.config.RESEND_FROM_EMAIL,
@@ -884,7 +888,7 @@ El límite es de 48 MB. Si un archivo es más grande, es probable que Amazon lo 
                 "text": f"Enviado desde tu Bot de Telegram. Archivo: {safe_fn}",
                 "attachments": [{
                 "filename": safe_fn,
-                "content": file_data
+                "content": file_base64
                 }]
             }
         
