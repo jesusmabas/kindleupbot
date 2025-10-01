@@ -869,44 +869,44 @@ El límite es de 48 MB. Si un archivo es más grande, es probable que Amazon lo 
         return await loop.run_in_executor(None, self._send_to_kindle_sync, kindle_email, file_data, filename, subject)
 
     def _send_to_kindle_sync(self, kindle_email: str, file_data: bytes, filename: str, subject: str) -> Tuple[bool, str]:
-    try:
-        import requests
-        
-        nfkd = unicodedata.normalize('NFKD', filename)
-        safe_fn = ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
-        
-        # Preparar el archivo para Mailgun
-        files = [
-            ('attachment', (safe_fn, file_data, mimetypes.guess_type(safe_fn)[0] or 'application/octet-stream'))
-        ]
-        
-        data = {
-            'from': self.config.MAILGUN_FROM_EMAIL,
-            'to': kindle_email,
-            'subject': subject or f"Doc: {safe_fn}",
-            'text': f"Enviado desde tu Bot de Telegram. Archivo: {safe_fn}"
-        }
-        
-        response = requests.post(
-            f"https://api.mailgun.net/v3/{self.config.MAILGUN_DOMAIN}/messages",
-            auth=("api", self.config.MAILGUN_API_KEY),
-            files=files,
-            data=data,
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            logger.info(f"Documento {safe_fn} enviado a {kindle_email} via Mailgun")
-            return True, "Enviado"
-        else:
-            logger.error(f"Error Mailgun {response.status_code}: {response.text}")
-            return False, f"Error Mailgun: {response.status_code}"
+        try:
+            import requests
             
-    except requests.exceptions.Timeout:
-        return False, "Timeout al conectar con Mailgun"
-    except Exception as e:
-        logger.error(f"Error Mailgun al enviar a Kindle: {e}", exc_info=True)
-        return False, f"Error Mailgun: {str(e)}"
+            nfkd = unicodedata.normalize('NFKD', filename)
+            safe_fn = ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
+            
+            # Preparar el archivo para Mailgun
+            files = [
+                ('attachment', (safe_fn, file_data, mimetypes.guess_type(safe_fn)[0] or 'application/octet-stream'))
+            ]
+            
+            data = {
+                'from': self.config.MAILGUN_FROM_EMAIL,
+                'to': kindle_email,
+                'subject': subject or f"Doc: {safe_fn}",
+                'text': f"Enviado desde tu Bot de Telegram. Archivo: {safe_fn}"
+            }
+            
+            response = requests.post(
+                f"https://api.mailgun.net/v3/{self.config.MAILGUN_DOMAIN}/messages",
+                auth=("api", self.config.MAILGUN_API_KEY),
+                files=files,
+                data=data,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"Documento {safe_fn} enviado a {kindle_email} via Mailgun")
+                return True, "Enviado"
+            else:
+                logger.error(f"Error Mailgun {response.status_code}: {response.text}")
+                return False, f"Error Mailgun: {response.status_code}"
+                
+        except requests.exceptions.Timeout:
+            return False, "Timeout al conectar con Mailgun"
+        except Exception as e:
+            logger.error(f"Error Mailgun al enviar a Kindle: {e}", exc_info=True)
+            return False, f"Error Mailgun: {str(e)}"
 
 # --- MODELOS PYDANTIC ---
 class StatusResponse(BaseModel):
