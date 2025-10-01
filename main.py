@@ -869,7 +869,7 @@ El límite es de 48 MB. Si un archivo es más grande, es probable que Amazon lo 
         return await loop.run_in_executor(None, self._send_to_kindle_sync, kindle_email, file_data, filename, subject)
 
     def _send_to_kindle_sync(self, kindle_email: str, file_data: bytes, filename: str, subject: str) -> Tuple[bool, str]:
-    try:
+        try:
         import resend
         
         resend.api_key = self.config.RESEND_API_KEY
@@ -892,7 +892,7 @@ El límite es de 48 MB. Si un archivo es más grande, es probable que Amazon lo 
         logger.info(f"Documento {safe_fn} enviado a {kindle_email} via Resend")
         return True, "Enviado"
         
-    except Exception as e:
+        except Exception as e:
         logger.error(f"Error Resend al enviar a Kindle: {e}", exc_info=True)
         return False, f"Error Resend: {str(e)}"
 
