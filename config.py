@@ -17,8 +17,6 @@ class Settings(BaseSettings):
     # Corresponds to GMAIL_USER and GMAIL_APP_PASSWORD env vars
     GMAIL_USER: str
     GMAIL_APP_PASSWORD: str
-    RESEND_API_KEY: str
-    RESEND_FROM_EMAIL: str
 
     # --- Database ---
     DATABASE_URL: str
@@ -47,7 +45,7 @@ class Settings(BaseSettings):
 
     # --- SMTP Server ---
     SMTP_SERVER: str = 'smtp.gmail.com'
-    SMTP_PORT: int = 587
+    SMTP_PORT: int = 465
     
     # --- Server ---
     HOST: str = "0.0.0.0"
