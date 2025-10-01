@@ -7,4 +7,4 @@ psycopg2-binary
 Jinja2
 pydantic
 aiofiles
-requests
+resend

@@ -17,9 +17,8 @@ class Settings(BaseSettings):
     # Corresponds to GMAIL_USER and GMAIL_APP_PASSWORD env vars
     GMAIL_USER: str
     GMAIL_APP_PASSWORD: str
-    MAILGUN_API_KEY: str
-    MAILGUN_DOMAIN: str
-    MAILGUN_FROM_EMAIL: str  # ej: "KindleBot <mailgun@tu-dominio.com>"
+    RESEND_API_KEY: str
+    RESEND_FROM_EMAIL: str
 
     # --- Database ---
     DATABASE_URL: str
