@@ -5,11 +5,11 @@ from typing import TYPE_CHECKING
 
 from telegram import Update
 
-from metrics import metrics_collector
-from limiter import rate_limiter
+from core.metrics import metrics_collector
+from core.limiter import rate_limiter
 
 if TYPE_CHECKING:
-    from ..bot import KindleEmailBot
+    from bot import KindleEmailBot
 
 logger = logging.getLogger(__name__)
 
