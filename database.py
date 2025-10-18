@@ -3,7 +3,7 @@ import logging
 import psycopg2
 from typing import List, Tuple, Any, Optional
 from contextlib import contextmanager
-from config import settings
+from .config import settings
 
 logger = logging.getLogger(__name__)
 
