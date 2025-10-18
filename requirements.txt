@@ -1,9 +1,6 @@
 pypandoc
 pydantic-settings
 python-telegram-bot==21.1.1
-fastapi
-uvicorn
 psycopg2-binary
-Jinja2
 pydantic
 aiofiles
