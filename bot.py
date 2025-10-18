@@ -13,7 +13,7 @@ from core.validators import EmailValidator, FileValidator
 from services.email_sender import EmailSender
 
 # Importar los módulos de handlers que contienen la lógica de los comandos
-from .handlers import commands, messages, callbacks
+from handlers import commands, messages, callbacks
 
 logger = logging.getLogger(__name__)
 

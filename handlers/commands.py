@@ -5,14 +5,14 @@ from typing import TYPE_CHECKING
 from telegram import Update, ReplyKeyboardRemove, ForceReply
 from telegram.ext import ContextTypes
 
-from ..core.metrics import metrics_collector
-from ..core.cache import cache_manager
-from ..core.validators import PROMPT_SET_EMAIL
-from ..core.decorators import track_metrics
-from ..database import get_total_users
+from core.metrics import metrics_collector
+from core.cache import cache_manager
+from core.validators import PROMPT_SET_EMAIL
+from core.decorators import track_metrics
+from database import get_total_users
 
 if TYPE_CHECKING:
-    from ..bot import KindleEmailBot
+    from bot import KindleEmailBot
 
 @track_metrics('command_start')
 async def start(bot: "KindleEmailBot", update: Update, context: ContextTypes.DEFAULT_TYPE):

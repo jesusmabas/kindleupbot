@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 
-from ..database import get_metrics_from_db, save_metric, get_total_users
+from database import get_metrics_from_db, save_metric, get_total_users
 
 logger = logging.getLogger(__name__)
 

@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING
 
 from telegram import Update
 
-from .metrics import metrics_collector
-from .limiter import rate_limiter
+from metrics import metrics_collector
+from limiter import rate_limiter
 
 if TYPE_CHECKING:
     from ..bot import KindleEmailBot

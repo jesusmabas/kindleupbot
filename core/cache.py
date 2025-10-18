@@ -30,5 +30,5 @@ class CacheManager:
         self.cache.clear()
 
 # Instancia global para ser usada en todo el bot
-from ..config import settings
+from config import settings
 cache_manager = CacheManager(default_ttl=settings.CACHE_DURATION)

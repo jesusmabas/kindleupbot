@@ -9,7 +9,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 from email.mime.text import MIMEText
 
-from ..config import Settings
+from config import Settings
 
 logger = logging.getLogger(__name__)
 

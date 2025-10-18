@@ -7,14 +7,14 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from ..core.metrics import metrics_collector
-from ..core.validators import PROMPT_SET_EMAIL
-from ..core.decorators import track_metrics
-from ..services.file_converter import convert_markdown_to_docx
-from ..database import get_total_users
+from core.metrics import metrics_collector
+from core.validators import PROMPT_SET_EMAIL
+from core.decorators import track_metrics
+from services.file_converter import convert_markdown_to_docx
+from database import get_total_users
 
 if TYPE_CHECKING:
-    from ..bot import KindleEmailBot
+    from bot import KindleEmailBot
 
 @track_metrics('handle_email_input')
 async def handle_email_input(bot: "KindleEmailBot", update: Update, context: ContextTypes.DEFAULT_TYPE):

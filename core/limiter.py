@@ -25,5 +25,5 @@ class RateLimiter:
         return max(0, int(self.window - (time.time() - oldest_request)))
 
 # Instancia global
-from ..config import settings
+from config import settings
 rate_limiter = RateLimiter(max_requests=settings.RATE_LIMIT_MAX_REQUESTS, window=settings.RATE_LIMIT_WINDOW)

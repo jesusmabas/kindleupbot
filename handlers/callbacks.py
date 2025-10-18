@@ -7,11 +7,11 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from ..core.metrics import metrics_collector
-from ..core.decorators import track_metrics
+from core.metrics import metrics_collector
+from core.decorators import track_metrics
 
 if TYPE_CHECKING:
-    from ..bot import KindleEmailBot
+    from bot import KindleEmailBot
 
 @track_metrics('handle_callback')
 async def handle_callback(bot: "KindleEmailBot", update: Update, context: ContextTypes.DEFAULT_TYPE):
