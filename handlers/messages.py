@@ -1,4 +1,3 @@
-# kindleupbot/handlers/messages.py
 import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -12,6 +11,9 @@ from core.validators import PROMPT_SET_EMAIL
 from core.decorators import track_metrics
 from services.file_converter import convert_markdown_to_docx
 from database import get_total_users
+
+# Importar el módulo de comandos para poder llamar a sus funciones
+from . import commands
 
 if TYPE_CHECKING:
     from bot import KindleEmailBot
@@ -87,7 +89,8 @@ async def handle_document(bot: "KindleEmailBot", update: Update, context: Contex
             processing_msg = await update.message.reply_html(f"⚙️ Convirtiendo <code>{doc.file_name}</code> a formato DOCX...")
             converted_path, convert_error = await convert_markdown_to_docx(temp_file_path, doc.file_name)
             if convert_error or not converted_path:
-                await processing_msg.edit_text(f"❌ <b>Error al convertir:</b>\n<i>{convert_error}</i>", parse_mode=ParseMode.HTML)
+                if processing_msg:
+                    await processing_msg.edit_text(f"❌ <b>Error al convertir:</b>\n<i>{convert_error}</i>", parse_mode=ParseMode.HTML)
                 return
             file_to_send_path = converted_path
             file_to_send_name = Path(doc.file_name).with_suffix('.docx').name
@@ -135,34 +138,46 @@ async def handle_text(bot: "KindleEmailBot", update: Update, context: ContextTyp
     text = update.message.text
     is_admin = bot.config.ADMIN_USER_ID and update.effective_user.id == bot.config.ADMIN_USER_ID
     
-    async def show_total_users(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    async def show_total_users(bot_instance: "KindleEmailBot", upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         total = await asyncio.to_thread(get_total_users)
         await upd.message.reply_text(f"👥 Hay un total de {total} usuarios registrados.")
         
     command_map = {
-        "📧 Configurar Email": bot.set_email_command, "🔍 Ver Mi Email": bot.my_email_command,
-        "📊 Mis Estadísticas": bot.stats_command, "❓ Ayuda": bot.help_command,
-        "🎯 Formatos Soportados": bot.formats_command, "🚀 Consejos": bot.tips_command
+        "📧 Configurar Email": commands.set_email_command,
+        "🔍 Ver Mi Email": commands.my_email_command,
+        "📊 Mis Estadísticas": commands.stats_command,
+        "❓ Ayuda": commands.help_command,
+        "🎯 Formatos Soportados": commands.formats_command,
+        "🚀 Consejos": commands.tips_command
     }
     admin_command_map = {
-        "👑 Panel Admin": bot.admin_command, "📈 Métricas": bot.admin_command,
-        "🧹 Limpiar Cache": bot.clear_cache_command,
-        "🔄 Reiniciar Stats": bot.reset_stats_command,
+        "👑 Panel Admin": commands.admin_command,
+        "📈 Métricas": commands.admin_command,
+        "🧹 Limpiar Cache": commands.clear_cache_command,
+        "🔄 Reiniciar Stats": commands.reset_stats_command,
         "👥 Usuarios": show_total_users,
-        "🏠 Menú Principal": lambda u, c: u.message.reply_text("Volviendo al menú principal...", reply_markup=bot.main_keyboard)
+        "🏠 Menú Principal": lambda b, u, c: u.message.reply_text("Volviendo al menú principal...", reply_markup=b.main_keyboard)
     }
     
     if text in command_map:
-        await command_map[text](update, context)
+        await command_map[text](bot, update, context)
     elif is_admin and text in admin_command_map:
-        await admin_command_map[text](update, context)
+        await admin_command_map[text](bot, update, context)
     else:
         text_lower = text.lower()
         if any(word in text_lower for word in ['hola', 'hello', 'hi', 'buenas']):
             await update.message.reply_text("¡Hola! 👋 Soy tu asistente de Kindle.\nEnvíame un documento para empezar.", reply_markup=bot.main_keyboard)
         elif any(word in text_lower for word in ['ayuda', 'help', 'auxilio']):
-            await bot.help_command(update, context)
+            await commands.help_command(bot, update, context)
         elif any(word in text_lower for word in ['gracias', 'thanks', 'thank you']):
             await update.message.reply_text("¡De nada! 😊 Estoy aquí para ayudarte.")
         else:
-            await update.message.reply_html("🤔 <b>No entiendo ese mensaje</b>\n\n💡 <b>Puedo ayudarte con:</b>\n• Configurar tu email de Kindle\n• Enviar documentos a tu dispositivo\n• Mostrar estadísticas de uso\n\n📄 <b>Envía un documento</b> o usa los botones del menú", reply_markup=bot.main_keyboard)
+            await update.message.reply_html(
+                "🤔 <b>No entiendo ese mensaje</b>\n\n"
+                "💡 <b>Puedo ayudarte con:</b>\n"
+                "• Configurar tu email de Kindle\n"
+                "• Enviar documentos a tu dispositivo\n"
+                "• Mostrar estadísticas de uso\n\n"
+                "📄 <b>Envía un documento</b> o usa los botones del menú",
+                reply_markup=bot.main_keyboard
+            )
