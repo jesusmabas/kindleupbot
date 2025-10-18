@@ -16,7 +16,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 5. Copiar todo el paquete de la aplicación
+# La carpeta 'kindleupbot' de tu repo se copia a '/app/kindleupbot' en el contenedor
 COPY kindleupbot/ ./kindleupbot/
 
 # 6. Comando para ejecutar la aplicación COMO UN MÓDULO
+# Esto le dice a Python que busque y ejecute main.py dentro del paquete kindleupbot
 CMD ["python", "-m", "kindleupbot.main"]
