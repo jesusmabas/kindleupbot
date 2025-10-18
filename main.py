@@ -1018,10 +1018,14 @@ async def clear_cache():
     return {"message": "Caché limpiado exitosamente"}
 
 # --- PUNTO DE ENTRADA ---
+async def start_polling(bot_instance: KindleEmailBot):
+    logger.info("Iniciando bot en modo Polling (sin webhook ni API web)")
+    await bot_instance.application.run_polling()
+    
 if __name__ == "__main__":
     try:
-        logger.info(f"Iniciando servidor en {settings.HOST}:{settings.PORT}")
-        uvicorn.run(app, host=settings.HOST, port=settings.PORT, log_level="info", access_log=True)
+        bot_instance = KindleEmailBot(settings)
+        asyncio.run(start_polling(bot_instance))
     except Exception as e:
-        logger.critical(f"CRITICAL: Error fatal al iniciar servidor: {e}", exc_info=True)
+        logger.critical(f"CRITICAL: Error fatal al iniciar bot: {e}", exc_info=True)
         raise
