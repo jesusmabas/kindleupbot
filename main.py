@@ -872,28 +872,23 @@ El límite es de 48 MB. Si un archivo es más grande, es probable que Amazon lo 
         try:
             nfkd = unicodedata.normalize('NFKD', filename)
             safe_fn = ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
-            
             msg = MIMEMultipart()
             msg['From'] = self.config.GMAIL_USER
             msg['To'] = kindle_email
             msg['Subject'] = subject or f"Doc: {safe_fn}"
             msg.attach(MIMEText(f"Enviado desde tu Bot de Telegram. Archivo: {safe_fn}"))
-            
             subtype = safe_fn.rsplit('.', 1)[-1]
             part = MIMEApplication(file_data, _subtype=subtype)
             part.add_header('Content-Disposition', 'attachment', filename=safe_fn)
             part.add_header('Content-Type', part.get_content_type(), name=safe_fn)
-            
             msg.attach(part)
-            
-            with smtplib.SMTP(self.config.SMTP_SERVER, self.config.SMTP_PORT) as server:
-                server.starttls()
+            # Usamos SMTP_SSL para el puerto 465
+            with smtplib.SMTP_SSL(self.config.SMTP_SERVER, self.config.SMTP_PORT) as server:
+                # La línea server.starttls() ya no es necesaria y se ha eliminado
                 server.login(self.config.GMAIL_USER, self.config.GMAIL_APP_PASSWORD)
                 server.send_message(msg)
-            
             logger.info(f"Documento {safe_fn} enviado a {kindle_email}")
             return True, "Enviado"
-        
         except smtplib.SMTPAuthenticationError:
             return False, "Error de autenticación SMTP"
         except smtplib.SMTPRecipientsRefused:
