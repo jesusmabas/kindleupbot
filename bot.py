@@ -6,11 +6,11 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKe
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 from telegram.constants import ParseMode
 
-from .config import Settings
-from .database import set_user_email, get_user_email, reset_metrics_table, log_admin_action
-from .core.metrics import metrics_collector
-from .core.validators import EmailValidator, FileValidator
-from .services.email_sender import EmailSender
+from config import Settings
+from database import set_user_email, get_user_email, reset_metrics_table, log_admin_action
+from core.metrics import metrics_collector
+from core.validators import EmailValidator, FileValidator
+from services.email_sender import EmailSender
 
 # Importar los módulos de handlers que contienen la lógica de los comandos
 from .handlers import commands, messages, callbacks

@@ -1,9 +1,9 @@
 # main.py
 import logging
-from .bot import KindleEmailBot
-from .config import settings
-from .database import setup_database
-from .core.metrics import metrics_collector
+from bot import KindleEmailBot
+from config import settings
+from database import setup_database
+from core.metrics import metrics_collector
 
 # Configurar logging inicial
 logging.basicConfig(
