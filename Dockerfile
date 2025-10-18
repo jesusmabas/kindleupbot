@@ -22,5 +22,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # 7. Comando para ejecutar la aplicación cuando se inicie el contenedor
-# Render proporcionará la variable de entorno $PORT, que usamos aquí.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "main.py"]
