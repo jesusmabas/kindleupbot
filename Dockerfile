@@ -19,7 +19,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 6. Copiar todo el código de tu aplicación al contenedor
-COPY . .
+COPY ./requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 7. Comando para ejecutar la aplicación cuando se inicie el contenedor
+COPY ./kindleupbot /app/kindleupbot
+COPY ./main.py /app/main.py
+
+# 7. Comando para ejecutar la aplicación
 CMD ["python", "main.py"]
