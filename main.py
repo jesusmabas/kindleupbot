@@ -1018,14 +1018,43 @@ async def clear_cache():
     return {"message": "Caché limpiado exitosamente"}
 
 # --- PUNTO DE ENTRADA ---
-async def start_polling(bot_instance: KindleEmailBot):
+def main() -> None:
+    """Inicia el bot en modo polling."""
     logger.info("Iniciando bot en modo Polling (sin webhook ni API web)")
-    await bot_instance.application.run_polling()
     
+    # Crear la instancia del bot
+    bot_instance = KindleEmailBot(settings)
+    
+    # Configurar los manejadores de forma síncrona
+    # (La librería lo gestionará internamente)
+    bot_instance.application.add_handler(CommandHandler("start", bot_instance.start))
+    bot_instance.application.add_handler(CommandHandler("help", bot_instance.help_command))
+    bot_instance.application.add_handler(CommandHandler("set_email", bot_instance.set_email_command))
+    bot_instance.application.add_handler(CommandHandler("my_email", bot_instance.my_email_command))
+    bot_instance.application.add_handler(CommandHandler("stats", bot_instance.stats_command))
+    bot_instance.application.add_handler(CommandHandler("admin", bot_instance.admin_command))
+    bot_instance.application.add_handler(CommandHandler("hide_keyboard", bot_instance.hide_keyboard_command))
+    bot_instance.application.add_handler(CommandHandler("formats", bot_instance.formats_command))
+    bot_instance.application.add_handler(CommandHandler("tips", bot_instance.tips_command))
+    bot_instance.application.add_handler(CommandHandler("clear_cache", bot_instance.clear_cache_command))
+    bot_instance.application.add_handler(CommandHandler("reset_stats", bot_instance.reset_stats_command))
+    bot_instance.application.add_handler(CallbackQueryHandler(bot_instance.handle_callback))
+    bot_instance.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, bot_instance.handle_email_input))
+    bot_instance.application.add_handler(MessageHandler(filters.Document.ALL, bot_instance.handle_document))
+    bot_instance.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.handle_text))
+    
+    # Cargar métricas y configurar la base de datos
+    setup_database()
+    logger.info("✅ Base de datos configurada")
+    metrics_collector.load_from_db()
+    logger.info("✅ Métricas cargadas")
+
+    # Iniciar el bot. Esta función es bloqueante.
+    bot_instance.application.run_polling()
+
 if __name__ == "__main__":
     try:
-        bot_instance = KindleEmailBot(settings)
-        asyncio.run(start_polling(bot_instance))
+        main()
     except Exception as e:
         logger.critical(f"CRITICAL: Error fatal al iniciar bot: {e}", exc_info=True)
         raise
